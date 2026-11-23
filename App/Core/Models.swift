@@ -22,7 +22,7 @@ enum MediaKind: String, Codable {
 
 enum MediaFormat {
     static let raw: Set<String> = ["dng", "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "raf", "orf", "rw2", "pef", "srw", "raw", "rwl", "3fr", "erf", "mrw", "x3f", "iiq", "mos", "kdc", "dcr"]
-    static let images: Set<String> = ["jpg", "jpeg", "jpe", "jfif", "heic", "heif", "hif", "png", "gif", "webp", "tif", "tiff", "bmp", "avif", "jxl", "psd", "ico"].union(raw)
+    static let images: Set<String> = Set(["jpg", "jpeg", "jpe", "jfif", "heic", "heif", "hif", "png", "gif", "webp", "tif", "tiff", "bmp", "avif", "jxl", "psd", "ico"]).union(raw)
     static let videos: Set<String> = ["mov", "mp4", "m4v", "3gp", "3g2", "avi", "mkv", "webm", "mts", "m2ts", "ts", "wmv", "mpg", "mpeg", "flv", "hevc"]
     /// Videos AVPlayer can open directly.
     static let playable: Set<String> = ["mov", "mp4", "m4v", "3gp", "3g2"]
