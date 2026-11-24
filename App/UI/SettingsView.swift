@@ -8,6 +8,7 @@ struct SettingsView: View {
     @State private var name = ""
     @State private var route = ""
     @State private var tailscale = ""
+    @State private var dsmPort = ""
     @State private var connectionMode = NASConnectionMode.automatic
     @State private var cacheSize = "—"
     @State private var saved = false
@@ -19,7 +20,7 @@ struct SettingsView: View {
         guard let account = store.account else { return true }
         return address != account.root.absoluteString || user != account.username || password != account.password
             || name != (account.displayName ?? "") || route != account.routeIP || tailscale != (account.tailscaleHost ?? "")
-            || connectionMode != (account.connectionMode ?? .automatic)
+            || connectionMode != (account.connectionMode ?? .automatic) || dsmPort != (account.dsmPort.map(String.init) ?? "")
     }
 
     var body: some View {
@@ -59,14 +60,18 @@ struct SettingsView: View {
                     LabeledField(title: "Tailscale") {
                         TextField("IP o nombre MagicDNS", text: $tailscale).textInputAutocapitalization(.never).autocorrectionDisabled()
                     }
+                    LabeledField(title: "Puerto DSM") {
+                        TextField("5001", text: $dsmPort).keyboardType(.numberPad)
+                    }
                     Picker("Ruta", selection: $connectionMode) { ForEach(NASConnectionMode.allCases, id: \.self) { Text($0.label).tag($0) } }
                 } header: { Text("Red local y Tailscale") } footer: {
-                    Text("Mantén arriba el dominio HTTPS del certificado. Automática prueba la red local y después Tailscale; activa Tailscale en el iPhone fuera de casa.")
+                    Text("Mantén arriba el dominio HTTPS del certificado. Automática prueba la red local y después Tailscale; activa Tailscale en el iPhone fuera de casa. El puerto DSM (5001 si lo dejas vacío) se usa solo para leer el espacio libre.")
                 }
                 Section {
                     Button {
                         Task {
-                            saved = await store.connect(root: address, user: user, password: password, route: route, tailscale: tailscale, mode: connectionMode, name: name)
+                            saved = await store.connect(root: address, user: user, password: password, route: route, tailscale: tailscale, mode: connectionMode, name: name,
+                                                        dsmPort: Int(dsmPort.trimmingCharacters(in: .whitespaces)).flatMap { (1...65535).contains($0) ? $0 : nil })
                             if saved { editingPassword = false }
                         }
                     } label: {
@@ -195,9 +200,10 @@ struct SettingsView: View {
 
     private func fill() {
         editingPassword = false
-        guard let account = store.account else { address = ""; user = ""; password = ""; name = ""; route = ""; tailscale = ""; return }
+        guard let account = store.account else { address = ""; user = ""; password = ""; name = ""; route = ""; tailscale = ""; dsmPort = ""; return }
         address = account.root.absoluteString; user = account.username; password = account.password; name = account.displayName ?? ""
         route = account.routeIP; tailscale = account.tailscaleHost ?? ""; connectionMode = account.connectionMode ?? .automatic
+        dsmPort = account.dsmPort.map(String.init) ?? ""
     }
 
     private func refreshCacheSize() {

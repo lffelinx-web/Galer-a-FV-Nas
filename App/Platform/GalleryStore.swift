@@ -114,6 +114,7 @@ final class GalleryStore: ObservableObject {
     private var captured: [String: CaptureInfo] = [:]
     private var datesTask: Task<Void, Never>?
     private var lastStatusUpdate = Date.distantPast
+    private var lastSpaceCheck = Date.distantPast
 
     private var indexName: String { "nas-" + String(Files.key(account?.scope ?? "none").prefix(16)) + ".json" }
     private var aspectsName: String { "aspects-" + String(Files.key(account?.scope ?? "none").prefix(16)) + ".json" }
@@ -227,13 +228,13 @@ final class GalleryStore: ObservableObject {
 
     // MARK: NAS
 
-    func connect(root: String, user: String, password: String, route: String, tailscale: String, mode: NASConnectionMode, name: String) async -> Bool {
+    func connect(root: String, user: String, password: String, route: String, tailscale: String, mode: NASConnectionMode, name: String, dsmPort: Int?) async -> Bool {
         guard !connecting else { return false }
         connecting = true; defer { connecting = false }
         do {
             let candidate = NASAccount(root: try URLPolicy.root(root), username: user.trimmingCharacters(in: .whitespaces), password: password,
                                        routeIP: route.trimmingCharacters(in: .whitespaces), tailscaleHost: tailscale.trimmingCharacters(in: .whitespacesAndNewlines),
-                                       connectionMode: mode, displayName: name.trimmingCharacters(in: .whitespacesAndNewlines))
+                                       connectionMode: mode, displayName: name.trimmingCharacters(in: .whitespacesAndNewlines), dsmPort: dsmPort)
             guard !candidate.username.isEmpty, !password.isEmpty, NASAccount.validRoute(candidate.routeIP),
                   NASAccount.validRoute(candidate.tailscaleHost ?? ""), !candidate.routes.isEmpty else {
                 throw GalleryError.message("Revisa usuario, contraseña e IP de conexión.")
@@ -247,6 +248,7 @@ final class GalleryStore: ObservableObject {
             lastRoute = response.route
             nasState = .connected
             if changed { await loadIndex(); scan() }
+            await refreshSpace(candidate, force: true)
             return true
         } catch {
             self.error = error.localizedDescription
@@ -270,9 +272,7 @@ final class GalleryStore: ObservableObject {
             guard self.account?.scope == account.scope else { return }
             lastRoute = response.route
             nasState = response.status == 207 ? .connected : .offline
-            if nasState == .connected, let space = try? await NASTransport(account).space(account.root), self.account?.scope == account.scope {
-                nasSpace = space
-            }
+            if nasState == .connected { await refreshSpace(account) }
         } catch {
             guard self.account?.scope == account.scope else { return }
             nasState = .offline
@@ -313,6 +313,18 @@ final class GalleryStore: ObservableObject {
                 self.error = error.localizedDescription
             }
         }
+    }
+
+    /// Free space of the share: from WebDAV when the NAS reports it there, otherwise from the
+    /// DSM API. Asked at most every half hour, since DSM records each sign-in.
+    private func refreshSpace(_ account: NASAccount, force: Bool = false) async {
+        guard force || nasSpace == nil || Date().timeIntervalSince(lastSpaceCheck) > 1800 else { return }
+        lastSpaceCheck = Date()
+        let transport = NASTransport(account)
+        var space = try? await transport.space(account.root)
+        if space?.available == nil { space = try? await DSMSpace.read(account, transport: transport) }
+        guard self.account?.scope == account.scope, let space else { return }
+        nasSpace = space
     }
 
     /// At most a few updates a second, so a long search does not redraw the screen constantly.
@@ -425,6 +437,9 @@ final class GalleryStore: ObservableObject {
         nasItems = sorted
         merge()
     }
+
+    /// The capture dates stopped before the end (the NAS stopped answering); they can be resumed.
+    var datesPaused: Bool { account != nil && datesTask == nil && !scanning && datesRead < nasItems.count && !nasItems.isEmpty }
 
     /// NAS files that were read but carry no capture date.
     var undatedItems: [GalleryItem] {

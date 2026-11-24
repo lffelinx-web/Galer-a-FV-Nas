@@ -29,6 +29,15 @@ enum URLPolicy {
             u.user == nil && u.password == nil && u.query == nil && u.fragment == nil && safePath(url) &&
             u.percentEncodedPath.hasPrefix(r.percentEncodedPath)
     }
+    /// The DSM web API of the same NAS (`https://host:5001/webapi/entry.cgi`), used only to
+    /// read the free space of the share.
+    static func allowedDSM(_ url: URL, account: NASAccount) -> Bool {
+        guard let u = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let r = URLComponents(url: account.root, resolvingAgainstBaseURL: false) else { return false }
+        return u.scheme == "https" && u.host?.lowercased() == r.host?.lowercased() && u.port == account.dsmPortValue &&
+            u.user == nil && u.password == nil && u.fragment == nil && u.percentEncodedPath == "/webapi/entry.cgi"
+    }
+
     static func validIPv4(_ text: String) -> Bool {
         if text.isEmpty { return true }
         let parts = text.split(separator: ".", omittingEmptySubsequences: false)

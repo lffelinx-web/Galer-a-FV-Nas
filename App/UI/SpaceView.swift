@@ -53,7 +53,16 @@ struct YearCount: Hashable {
     let count: Int
 }
 
-/// Numbers for the summary, counted off the main thread.
+/// Photos from this day in an earlier year.
+struct Memory: Identifiable {
+    let year: Int
+    let yearsAgo: Int
+    let items: [GalleryItem]
+    var id: Int { year }
+    var title: String { yearsAgo == 1 ? "Hace 1 año" : "Hace \(yearsAgo) años" }
+}
+
+/// What Espacio shows, counted off the main thread.
 struct SpaceStats {
     var photos = 0
     var videos = 0
@@ -61,50 +70,86 @@ struct SpaceStats {
     var nas = 0
     var years: [YearCount] = []
     var counts: [SmartCollection: Int] = [:]
+    /// The newest item of each collection, for its cover.
+    var covers: [SmartCollection: GalleryItem] = [:]
+    var memories: [Memory] = []
 
-    static func count(phone: [GalleryItem], nas: [GalleryItem], hidden: Set<String>, isFavorite: (GalleryItem) -> Bool) -> SpaceStats {
+    static func count(phone: [GalleryItem], nas: [GalleryItem], hidden: Set<String>, today: Date = Date(),
+                      isFavorite: (GalleryItem) -> Bool) -> SpaceStats {
         var stats = SpaceStats()
         var years: [Int: Int] = [:]
         let calendar = Calendar.current
+        let now = calendar.dateComponents([.year, .month, .day], from: today)
+        let todayOfYear = calendar.ordinality(of: .day, in: .year, for: today) ?? 0
+        var sameDay: [Int: [GalleryItem]] = [:]
+        var sameWeek: [Int: [GalleryItem]] = [:]
+
+        func cover(_ collection: SmartCollection, _ item: GalleryItem) {
+            stats.counts[collection, default: 0] += 1
+            if let current = stats.covers[collection], current.date >= item.date { return }
+            if item.isVideo && collection != .videos, stats.covers[collection] != nil { return }
+            stats.covers[collection] = item
+        }
+
         for item in phone + nas where !hidden.contains(item.id) {
             if item.isVideo { stats.videos += 1 } else { stats.photos += 1 }
             if item.isNAS { stats.nas += 1 } else { stats.phone += 1 }
-            years[calendar.component(.year, from: item.date), default: 0] += 1
-            if isFavorite(item) { stats.counts[.favorites, default: 0] += 1 }
-            if item.isVideo { stats.counts[.videos, default: 0] += 1 }
-            if item.kind == .livePhoto { stats.counts[.livePhotos, default: 0] += 1 }
-            if item.isScreenshot { stats.counts[.screenshots, default: 0] += 1 }
-            if item.isRAW { stats.counts[.raw, default: 0] += 1 }
+            let parts = calendar.dateComponents([.year, .month, .day], from: item.date)
+            let year = parts.year ?? 0
+            years[year, default: 0] += 1
+            if isFavorite(item) { cover(.favorites, item) }
+            if item.isVideo { cover(.videos, item) }
+            if item.kind == .livePhoto { cover(.livePhotos, item) }
+            if item.isScreenshot { cover(.screenshots, item) }
+            if item.isRAW { cover(.raw, item) }
+            // Memories: the same day in earlier years, or the same week when no day matches.
+            guard let currentYear = now.year, year > 1970, year < currentYear, !item.isScreenshot else { continue }
+            if parts.month == now.month && parts.day == now.day { sameDay[year, default: []].append(item); continue }
+            if let dayOfYear = calendar.ordinality(of: .day, in: .year, for: item.date), abs(dayOfYear - todayOfYear) <= 3 {
+                sameWeek[year, default: []].append(item)
+            }
         }
         stats.years = years.filter { $0.key > 1970 }.sorted { $0.key < $1.key }.map { YearCount(year: $0.key, count: $0.value) }
+        let chosen = sameDay.isEmpty ? sameWeek : sameDay
+        stats.memories = chosen.map { year, items in
+            Memory(year: year, yearsAgo: (now.year ?? year) - year, items: items.sorted { $0.date > $1.date })
+        }
+        .sorted { $0.year > $1.year }
         return stats
     }
 }
 
-/// Espacio: a summary of the whole library, the app's albums, automatic collections and
-/// the hidden album.
+/// Espacio: your personal library. What matters first (memories, favorites, albums), then
+/// collections and tools, and the numbers at the end.
 struct SpaceView: View {
     @EnvironmentObject var store: GalleryStore
     @State private var naming = false
     @State private var newName = ""
     @State private var stats = SpaceStats()
+    @State private var favorites: [GalleryItem] = []
     @State private var showHidden = false
     @State private var lockMessage: String?
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    Text("Espacio").font(.system(size: 34, weight: .bold)).foregroundStyle(Palette.ink).padding(.top, 8)
-                    summary
+                VStack(alignment: .leading, spacing: 28) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Espacio").font(.system(size: 34, weight: .bold)).foregroundStyle(Palette.ink)
+                        Text("Tu biblioteca personal").font(.subheadline).foregroundStyle(Palette.secondary)
+                    }
+                    .padding(.top, 8)
+                    if !stats.memories.isEmpty { memories }
+                    if !favorites.isEmpty { favoritesSection }
                     albumsSection
-                    list("Tipos", SmartCollection.types)
-                    list("Utilidades", SmartCollection.utilities)
-                    privateSection
+                    collections
+                    utilities
+                    section("Resumen") { summary }
                 }
                 .padding(.horizontal, 16)
             }
             .contentMargins(.bottom, 110, for: .scrollContent)
+            .scrollIndicators(.hidden)
             .background(AppBackground())
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: UUID.self) { AlbumDetailView(id: $0) }
@@ -123,16 +168,146 @@ struct SpaceView: View {
     }
 
     private func count() async {
-        let (phone, nas, hidden, favorites) = (store.phoneItems, store.nasItems, store.hidden, store.favorites)
+        let (phone, nas, hidden, favoriteIDs) = (store.phoneItems, store.nasItems, store.hidden, store.favorites)
         var result = await Task.detached(priority: .utility) {
             SpaceStats.count(phone: phone, nas: nas, hidden: hidden) { item in
-                favorites.contains(item.id) || (item.favorite && !favorites.contains("-" + item.id))
+                favoriteIDs.contains(item.id) || (item.favorite && !favoriteIDs.contains("-" + item.id))
             }
         }.value
         result.counts[.duplicates] = store.duplicateIDs.count
         result.counts[.recent] = store.lastAdded.count
         result.counts[.undated] = store.undatedItems.count
+        result.covers[.recent] = store.lastAdded.lazy.compactMap { store.itemIndex[$0] }.first
+        if let selfie = await PhoneLibrary.shared.ids(in: .smartAlbumSelfPortraits, limit: 1).first { result.covers[.selfies] = store.itemIndex[selfie] }
         stats = result
+        favorites = Array(store.favoriteItems.prefix(24))
+    }
+
+    private func section<Content: View, Trailing: View>(_ title: String, @ViewBuilder trailing: () -> Trailing = { EmptyView() },
+                                                        @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title).font(.title2.bold()).foregroundStyle(Palette.ink)
+                Spacer()
+                trailing()
+            }
+            content()
+        }
+    }
+
+    /// A row that scrolls sideways edge to edge.
+    private func carousel<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12, content: content).padding(.horizontal, 16)
+        }
+        .padding(.horizontal, -16)
+    }
+
+    // MARK: Memories
+
+    private var memories: some View {
+        section("Recuerdos") {
+            carousel {
+                ForEach(stats.memories) { memory in
+                    Button { if let first = memory.items.first { store.open(first, in: memory.items) } } label: {
+                        MemoryCard(memory: memory)
+                    }
+                    .buttonStyle(PressStyle())
+                }
+            }
+        }
+    }
+
+    // MARK: Favorites
+
+    private var favoritesSection: some View {
+        section("Favoritos") {
+            NavigationLink(value: SmartCollection.favorites) {
+                Text("Ver todos").font(.subheadline.weight(.semibold)).foregroundStyle(Palette.accent)
+            }
+        } content: {
+            carousel {
+                ForEach(favorites) { item in
+                    Button { store.open(item, in: favorites) } label: {
+                        Thumbnail(item: item, pixelSize: 130)
+                            .frame(width: 130, height: 130)
+                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    }
+                    .buttonStyle(PressStyle())
+                }
+            }
+        }
+    }
+
+    // MARK: Albums
+
+    private var albumsSection: some View {
+        section("Mis álbumes") {
+            carousel {
+                Button { newName = ""; naming = true } label: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(Palette.accent.opacity(0.08))
+                            .overlay { Image(systemName: "plus").font(.system(size: 28, weight: .semibold)).foregroundStyle(Palette.accent) }
+                            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Palette.accent.opacity(0.3), style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])))
+                            .frame(width: 150, height: 150)
+                        Text("Nuevo álbum").font(.subheadline.weight(.semibold)).foregroundStyle(Palette.ink)
+                        Text(" ").font(.caption)
+                    }
+                }
+                .buttonStyle(PressStyle())
+                ForEach(store.albums) { album in
+                    let items = store.items(in: album)
+                    NavigationLink(value: album.id) {
+                        CoverCard(title: album.name, subtitle: countText(items.count, "elemento", "elementos"), cover: items.first, symbol: "rectangle.stack")
+                            .frame(width: 150)
+                    }
+                    .buttonStyle(PressStyle())
+                }
+            }
+        }
+    }
+
+    // MARK: Collections
+
+    private var collections: some View {
+        section("Colecciones") {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                ForEach([SmartCollection.videos, .livePhotos, .selfies, .screenshots, .raw, .recent]) { collection in
+                    NavigationLink(value: collection) {
+                        CollectionTile(collection: collection, cover: stats.covers[collection], count: stats.counts[collection])
+                    }
+                    .buttonStyle(PressStyle())
+                }
+            }
+        }
+    }
+
+    // MARK: Utilities
+
+    private var utilities: some View {
+        section("Utilidades") {
+            HStack(spacing: 10) {
+                NavigationLink(value: SmartCollection.duplicates) { chip("Duplicados", "square.on.square", stats.counts[.duplicates]) }
+                NavigationLink(value: SmartCollection.undated) { chip("Sin fecha", "calendar.badge.exclamationmark", stats.counts[.undated]) }
+                Button { Task { await unlock() } } label: { chip("Oculto", "lock.fill", nil) }
+            }
+            .buttonStyle(PressStyle())
+        }
+    }
+
+    private func chip(_ title: String, _ symbol: String, _ count: Int?) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Image(systemName: symbol).font(.system(size: 17, weight: .semibold)).foregroundStyle(Palette.accent)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(Palette.ink).lineLimit(1).minimumScaleFactor(0.8)
+                Text(count.map { $0.formatted() } ?? "Face ID").font(.caption).foregroundStyle(Palette.secondary)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.white, lineWidth: 1))
     }
 
     // MARK: Summary
@@ -209,90 +384,7 @@ struct SpaceView: View {
         .defaultScrollAnchor(.trailing)
     }
 
-    // MARK: Albums
 
-    private var albumsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Mis álbumes").font(.title3.bold()).foregroundStyle(Palette.ink)
-                Spacer()
-                Button { newName = ""; naming = true } label: {
-                    Image(systemName: "plus").font(.system(size: 16, weight: .semibold)).foregroundStyle(Palette.accent)
-                        .frame(width: 38, height: 38).contentShape(Circle())
-                        .liquidCircle()
-                }
-                .buttonStyle(PressStyle())
-                .accessibilityLabel("Nuevo álbum")
-            }
-            if store.albums.isEmpty {
-                Text("Junta fotos del iPhone y del NAS. Para agregar una, ábrela y toca el botón de álbum.")
-                    .font(.subheadline).foregroundStyle(Palette.secondary)
-            } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 14) {
-                        ForEach(store.albums) { album in
-                            let items = store.items(in: album)
-                            NavigationLink(value: album.id) {
-                                CoverCard(title: album.name, subtitle: countText(items.count, "elemento", "elementos"), cover: items.first, symbol: "rectangle.stack")
-                                    .frame(width: 140)
-                            }
-                            .buttonStyle(PressStyle())
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // MARK: Lists
-
-    private func list(_ title: String, _ collections: [SmartCollection]) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title).font(.title3.bold()).foregroundStyle(Palette.ink)
-            VStack(spacing: 0) {
-                ForEach(Array(collections.enumerated()), id: \.element) { index, collection in
-                    NavigationLink(value: collection) {
-                        row(collection.title, symbol: collection.symbol, count: stats.counts[collection])
-                    }
-                    .buttonStyle(.plain)
-                    if index < collections.count - 1 { Divider().padding(.leading, 52) }
-                }
-            }
-            .padding(.vertical, 4)
-            .background(Color.white.opacity(0.75), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(Color.white, lineWidth: 1))
-        }
-    }
-
-    private func row(_ title: String, symbol: String, count: Int?) -> some View {
-        HStack(spacing: 14) {
-            Image(systemName: symbol).font(.system(size: 15, weight: .semibold)).foregroundStyle(Palette.accent)
-                .frame(width: 26)
-            Text(title).foregroundStyle(Palette.ink)
-            Spacer()
-            if let count { Text(count.formatted()).foregroundStyle(Palette.secondary).monospacedDigit() }
-            Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(Palette.secondary.opacity(0.6))
-        }
-        .padding(.horizontal, 14).frame(height: 50)
-        .contentShape(Rectangle())
-    }
-
-    private var privateSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Privado").font(.title3.bold()).foregroundStyle(Palette.ink)
-            Button { Task { await unlock() } } label: {
-                row("Oculto", symbol: "eye.slash.fill", count: nil)
-                    .overlay(alignment: .trailing) {
-                        Image(systemName: "faceid").foregroundStyle(Palette.secondary).padding(.trailing, 40)
-                    }
-            }
-            .buttonStyle(.plain)
-            .background(Color.white.opacity(0.75), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(Color.white, lineWidth: 1))
-            Text("Las fotos ocultas no aparecen en Fototeca ni en NAS. Para ocultar una, ábrela y toca el ojo.")
-                .font(.footnote).foregroundStyle(Palette.secondary)
-        }
-    }
 
     /// Face ID (or the passcode) opens the hidden album.
     private func unlock() async {
@@ -307,6 +399,57 @@ struct SpaceView: View {
         } catch {
             if (error as? LAError)?.code != .userCancel { lockMessage = error.localizedDescription }
         }
+    }
+}
+
+/// «Hace 3 años»: a large photo of that day with the title over it.
+struct MemoryCard: View {
+    let memory: Memory
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            if let cover = memory.items.first(where: { !$0.isVideo }) ?? memory.items.first {
+                Thumbnail(item: cover, pixelSize: 280).frame(width: 260, height: 180)
+            }
+            LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .center, endPoint: .bottom)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(memory.title).font(.title3.bold())
+                Text(String(memory.year) + " · " + mediaSummary(memory.items)).font(.caption.weight(.medium)).opacity(0.9)
+            }
+            .foregroundStyle(.white)
+            .padding(14)
+        }
+        .frame(width: 260, height: 180)
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(memory.title), \(memory.year)")
+    }
+}
+
+/// A collection with its newest photo behind the title and the count.
+struct CollectionTile: View {
+    let collection: SmartCollection
+    let cover: GalleryItem?
+    let count: Int?
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            if let cover {
+                GeometryReader { geo in Thumbnail(item: cover, pixelSize: geo.size.width).frame(width: geo.size.width, height: geo.size.height) }
+            } else {
+                Palette.selection.opacity(0.85)
+            }
+            LinearGradient(colors: [.black.opacity(0.05), .black.opacity(0.6)], startPoint: .top, endPoint: .bottom)
+            VStack(alignment: .leading, spacing: 4) {
+                Image(systemName: collection.symbol).font(.system(size: 15, weight: .semibold))
+                Text(collection.title).font(.subheadline.weight(.semibold)).lineLimit(1).minimumScaleFactor(0.8)
+                if let count { Text(count.formatted()).font(.caption).opacity(0.9) }
+            }
+            .foregroundStyle(.white)
+            .padding(12)
+        }
+        .frame(height: 124)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(collection.title)\(count.map { ", \($0)" } ?? "")")
     }
 }
 

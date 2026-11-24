@@ -263,3 +263,29 @@ final class SpaceTests: XCTestCase {
         XCTAssertFalse(item("IMG_1234.HEIC").isScreenshot)
     }
 }
+
+final class DSMTests: XCTestCase {
+    private let account = NASAccount(root: URL(string: "https://lfaz.example.me:5006/home/Photos/")!, username: "u", password: "p",
+                                     routeIP: "", tailscaleHost: nil, connectionMode: nil, displayName: nil)
+
+    func testOnlyTheDSMEntryPointOfTheSameNASIsAllowed() {
+        XCTAssertTrue(URLPolicy.allowedDSM(URL(string: "https://lfaz.example.me:5001/webapi/entry.cgi?api=SYNO.API.Auth")!, account: account))
+        XCTAssertFalse(URLPolicy.allowedDSM(URL(string: "https://lfaz.example.me:5006/webapi/entry.cgi")!, account: account))
+        XCTAssertFalse(URLPolicy.allowedDSM(URL(string: "https://other.example.me:5001/webapi/entry.cgi")!, account: account))
+        XCTAssertFalse(URLPolicy.allowedDSM(URL(string: "https://lfaz.example.me:5001/webapi/other.cgi")!, account: account))
+        XCTAssertFalse(URLPolicy.allowed(URL(string: "https://lfaz.example.me:5001/webapi/entry.cgi")!, root: account.root))
+    }
+
+    func testPicksTheShareOfTheFolder() throws {
+        let json = """
+        {"success":true,"data":{"shares":[
+          {"name":"music","path":"/music","additional":{"volume_status":{"freespace":100,"totalspace":1000}}},
+          {"name":"home","path":"/home","additional":{"volume_status":{"freespace":1319413953331,"totalspace":4000000000000}}}]}}
+        """
+        struct Wrapper: Decodable { let data: Inner; struct Inner: Decodable { let shares: [DSMSpace.Share] } }
+        let shares = try JSONDecoder().decode(Wrapper.self, from: Data(json.utf8)).data.shares
+        let space = DSMSpace.space(for: account.root, in: shares)
+        XCTAssertEqual(space?.available, 1_319_413_953_331)
+        XCTAssertEqual(space?.total, 4_000_000_000_000)
+    }
+}

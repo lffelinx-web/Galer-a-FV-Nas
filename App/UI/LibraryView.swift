@@ -389,11 +389,16 @@ struct LibraryView: View {
             HStack {
                 Brand()
                 Spacer(minLength: 8)
-                Button { showInfo = true } label: { StatusPill(short: true) }
-                    .buttonStyle(PressStyle())
+                // A tap gesture that wins over the photos behind, so the first touch always opens it.
+                StatusPill(short: true)
+                    .contentShape(Capsule())
+                    .highPriorityGesture(TapGesture().onEnded { showInfo = true })
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction { showInfo = true }
                     .accessibilityHint("Muestra el estado del NAS")
                     .popover(isPresented: $showInfo) {
-                        NASInfoCard(openNAS: { showInfo = false; openNAS() })
+                        NASInfoCard(openNAS: { showInfo = false; openNAS() },
+                                    openSettings: { showInfo = false; openSettings() })
                             .presentationCompactAdaptation(.popover)
                     }
             }
@@ -433,6 +438,7 @@ struct LibraryView: View {
 struct NASInfoCard: View {
     @EnvironmentObject var store: GalleryStore
     var openNAS: () -> Void
+    var openSettings: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -458,7 +464,12 @@ struct NASInfoCard: View {
                     action(store.scanning ? "Buscando…" : "Buscar fotos nuevas", "arrow.triangle.2.circlepath", primary: true) { store.scan() }
                         .disabled(store.scanning)
                     HStack(spacing: 8) {
-                        action("Probar", "antenna.radiowaves.left.and.right", primary: false) { Task { await store.checkConnection() } }
+                        // Resume the capture dates when they stopped; otherwise, the NAS settings.
+                        if store.datesPaused {
+                            action("Reanudar fechas", "calendar.badge.clock", primary: false) { store.readCaptureDates() }
+                        } else {
+                            action("Configuración", "gearshape", primary: false, run: openSettings)
+                        }
                         action("Ir al NAS", "server.rack", primary: false, run: openNAS)
                     }
                 }

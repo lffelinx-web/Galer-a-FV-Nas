@@ -45,7 +45,8 @@ final class NASTransport: @unchecked Sendable {
 
     private func requestOnRoute(_ url: URL, route: String, method: String, headers: [String: String], body: Data, limit: Int, allowPrefix: Bool) async throws -> NASResponse {
 
-        guard URLPolicy.allowed(url, root: account.root), ["GET", "PROPFIND"].contains(method),
+        let dsm = URLPolicy.allowedDSM(url, account: account)
+        guard (URLPolicy.allowed(url, root: account.root) && ["GET", "PROPFIND"].contains(method)) || (dsm && ["GET", "POST"].contains(method)),
 
               NASAccount.validRoute(route), !account.username.contains(":"),
 
@@ -119,7 +120,9 @@ final class NASTransport: @unchecked Sendable {
 
             connectTimeout.cancel()
 
-            let path = URLComponents(url: url, resolvingAgainstBaseURL: false)!.percentEncodedPath
+            let components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+            // Only DSM API calls carry a query; WebDAV URLs never do.
+            let path = components.percentEncodedPath + (dsm ? components.percentEncodedQuery.map { "?" + $0 } ?? "" : "")
 
             let hostValue = (host.contains(":") ? "[\(host)]" : host) + (url.port.map { ":\($0)" } ?? "")
 

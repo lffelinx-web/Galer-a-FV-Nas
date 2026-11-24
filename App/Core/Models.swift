@@ -9,6 +9,9 @@ struct NASAccount: Codable, Equatable {
     var connectionMode: NASConnectionMode?
     /// The name shown in the status pill, such as `DS120j`. Defaults to the first label of the domain.
     var displayName: String?
+    /// HTTPS port of DSM, to read the free space. 5001 when not set.
+    var dsmPort: Int?
+    var dsmPortValue: Int { dsmPort ?? 5001 }
     var scope: String { root.absoluteString + "|" + username }
     var label: String {
         if let name = displayName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty { return name }
