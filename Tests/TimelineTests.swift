@@ -238,3 +238,28 @@ final class BarDirectionTests: XCTestCase {
         XCTAssertNil(direction.update(4_000), "a jump is not a gesture")
     }
 }
+
+final class SpaceTests: XCTestCase {
+    func testParsesQuotaFromWebDAV() {
+        let xml = """
+        <?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>/home/Photos/</D:href>
+        <D:propstat><D:prop><D:quota-available-bytes>1319413953331</D:quota-available-bytes><D:quota-used-bytes>2680586046669</D:quota-used-bytes></D:prop>
+        <D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>
+        """
+        let space = NASTransport.parseSpace(xml)
+        XCTAssertEqual(space?.available, 1_319_413_953_331)
+        XCTAssertEqual(space?.used, 2_680_586_046_669)
+        XCTAssertEqual(space?.total, 4_000_000_000_000)
+        XCTAssertNil(NASTransport.parseSpace("<D:multistatus xmlns:D=\"DAV:\"></D:multistatus>"))
+    }
+
+    func testScreenshotsAreRecognizedByName() {
+        func item(_ name: String) -> GalleryItem {
+            GalleryItem(id: name, source: .nas(URL(string: "https://nas.example.com/p/x.png")!), date: Date(), kind: .photo,
+                        aspect: 1, duration: nil, name: name, bytes: nil, folder: nil)
+        }
+        XCTAssertTrue(item("Screenshot_2021-03-09-18-20-11.png").isScreenshot)
+        XCTAssertTrue(item("Captura de pantalla 2024-01-02.png").isScreenshot)
+        XCTAssertFalse(item("IMG_1234.HEIC").isScreenshot)
+    }
+}

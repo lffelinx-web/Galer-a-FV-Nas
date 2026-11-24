@@ -3,8 +3,13 @@ import UIKit
 
 private struct WallKey: Equatable {
     let revision: Int
-    let scale: TimeScale
     let width: CGFloat
+}
+
+/// A request to show a day, from Ir a fecha.
+struct DateJump: Equatable {
+    let id = UUID()
+    let date: Date
 }
 
 /// Scroll position shared with the header, so only the header redraws while scrolling.
@@ -17,25 +22,29 @@ private struct HeaderHeightKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
-/// The photo wall shared by Fototeca and NAS: a mosaic by day, a grid by month or a card
-/// per year. The layout is measured off the main thread and drawn by a collection view
-/// that reuses its cells, so it stays smooth with tens of thousands of photos.
+/// The photo wall shared by Fototeca and NAS: a mosaic by day, a collage per month or per
+/// year. All three are measured in advance off the main thread, so changing the scale is
+/// immediate, and drawn by a collection view that reuses its cells.
 struct PhotoWall<Header: View, Empty: View>: View {
     @EnvironmentObject var store: GalleryStore
     var items: [GalleryItem]
     var revision: Int
     @Binding var scale: TimeScale
     var topRequest: Int
-    var onScroll: (CGFloat) -> Void
+    var jump: DateJump?
+    /// Distance from the top, and whether the finger moved it.
+    var onScroll: (CGFloat, Bool) -> Void
     var refresh: () async -> Void
     @ViewBuilder var header: () -> Header
     @ViewBuilder var empty: () -> Empty
 
-    @State private var layout = WallLayout()
+    @State private var layouts: [TimeScale: WallLayout] = [:]
+    @State private var shown = WallLayout()
     @State private var layoutID = 0
-    @State private var building = true
+    @State private var animateChange = false
     @State private var headerHeight: CGFloat = 0
     @State private var focus: Date?
+    @State private var waitingFor: TimeScale?
     // Held without observing: only the header follows the scroll.
     @State private var scroll = WallScroll()
     @State private var tracker = WallTracker()
@@ -50,44 +59,65 @@ struct PhotoWall<Header: View, Empty: View>: View {
                 .refreshable { await refresh() }
             } else {
                 ZStack(alignment: .top) {
-                    CollectionWall(layout: layout, layoutID: layoutID, topInset: headerHeight, topRequest: topRequest,
+                    CollectionWall(layout: shown, layoutID: layoutID, animated: animateChange, topInset: headerHeight, topRequest: topRequest,
                                    tracker: tracker,
-                                   onScroll: { distance in
+                                   onScroll: { distance, user in
                                        scroll.distance = distance
-                                       onScroll(distance)
+                                       onScroll(distance, user)
                                    },
                                    onSelect: select,
                                    refresh: refresh)
                         .ignoresSafeArea()
                     WallHeader(scroll: scroll) { header() }
                         .background(GeometryReader { proxy in Color.clear.preference(key: HeaderHeightKey.self, value: proxy.size.height) })
-                    if building && layout.elements.isEmpty {
+                    if shown.elements.isEmpty {
                         ProgressView().padding(.top, headerHeight + 80)
                     }
                 }
                 .onPreferenceChange(HeaderHeightKey.self) { headerHeight = $0 }
-                .task(id: WallKey(revision: revision, scale: scale, width: geo.size.width)) {
-                    await build(width: geo.size.width)
+                .task(id: WallKey(revision: revision, width: geo.size.width)) {
+                    await buildAll(width: geo.size.width)
+                }
+                .onChange(of: scale) { _, next in show(next, animated: true) }
+                .onChange(of: jump) { _, request in
+                    guard let request else { return }
+                    focus = request.date
+                    if scale == .days { show(.days, animated: true) } else { scale = .days }
                 }
             }
         }
     }
 
-    private func build(width: CGFloat) async {
+    /// Builds the scale on screen first, then the other two, so switching never waits.
+    private func buildAll(width: CGFloat) async {
         guard width > 0 else { return }
-        building = true
-        // Keep the place: a new scale opens at the dates on screen, or at the one tapped.
-        let scaleChanged = scale != layout.scale && !layout.elements.isEmpty
-        let focus = self.focus ?? (scaleChanged && tracker.distance > 30 ? tracker.topDate : nil)
-        let (items, scale) = (self.items, self.scale)
-        let result = await Task.detached(priority: .userInitiated) {
-            WallLayout.build(items, scale: scale, width: width, focus: focus)
-        }.value
+        let items = self.items
+        let first = scale
+        let current = await Task.detached(priority: .userInitiated) { WallLayout.build(items, scale: first, width: width) }.value
         guard !Task.isCancelled else { return }
-        self.focus = nil
-        layout = result
+        layouts = [first: current]
+        if scale == first { display(current, animated: false) }
+        for other in TimeScale.allCases where other != first {
+            let layout = await Task.detached(priority: .utility) { WallLayout.build(items, scale: other, width: width) }.value
+            guard !Task.isCancelled else { return }
+            layouts[other] = layout
+            if waitingFor == other, scale == other { waitingFor = nil; show(other, animated: true) }
+        }
+    }
+
+    /// Switches to a scale, opening at the dates on screen or at the one tapped.
+    private func show(_ next: TimeScale, animated: Bool) {
+        guard var layout = layouts[next] else { waitingFor = next; return }
+        let target = focus ?? (tracker.distance > 30 ? tracker.topDate : nil)
+        focus = nil
+        layout.initialY = target.flatMap { layout.top(for: $0) } ?? (tracker.distance > 30 ? nil : 0)
+        display(layout, animated: animated)
+    }
+
+    private func display(_ layout: WallLayout, animated: Bool) {
+        animateChange = animated
+        shown = layout
         layoutID += 1
-        building = false
     }
 
     private func select(_ element: WallElement) {
@@ -99,8 +129,7 @@ struct PhotoWall<Header: View, Empty: View>: View {
         case .card(let section):
             // A year opens its months; a month opens its days.
             focus = section.date
-            let next: TimeScale = layout.scale == .years ? .months : .days
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { scale = next }
+            scale = shown.scale == .years ? .months : .days
         }
     }
 }
@@ -125,20 +154,36 @@ final class WallTracker {
 
 // MARK: Collection view
 
+/// Holds the collection view, so a change of scale can cross-fade over a snapshot.
+final class WallContainerView: UIView {
+    let collectionView = UICollectionView(frame: .zero, collectionViewLayout: WallCollectionLayout())
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        collectionView.frame = bounds
+        collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(collectionView)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+}
+
 struct CollectionWall: UIViewRepresentable {
     var layout: WallLayout
     var layoutID: Int
+    var animated: Bool
     var topInset: CGFloat
     var topRequest: Int
     var tracker: WallTracker
-    var onScroll: (CGFloat) -> Void
+    var onScroll: (CGFloat, Bool) -> Void
     var onSelect: (WallElement) -> Void
     var refresh: () async -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    func makeUIView(context: Context) -> UICollectionView {
-        let view = UICollectionView(frame: .zero, collectionViewLayout: WallCollectionLayout())
+    func makeUIView(context: Context) -> WallContainerView {
+        let container = WallContainerView()
+        let view = container.collectionView
         view.backgroundColor = .clear
         view.showsVerticalScrollIndicator = false
         view.alwaysBounceVertical = true
@@ -151,11 +196,12 @@ struct CollectionWall: UIViewRepresentable {
         control.addTarget(context.coordinator, action: #selector(Coordinator.refreshPulled(_:)), for: .valueChanged)
         view.refreshControl = control
         context.coordinator.lastTopRequest = topRequest
-        return view
+        return container
     }
 
-    func updateUIView(_ view: UICollectionView, context: Context) {
+    func updateUIView(_ container: WallContainerView, context: Context) {
         let coordinator = context.coordinator
+        let view = container.collectionView
         coordinator.parent = self
         if view.contentInset.top != topInset {
             let atTop = view.contentOffset.y <= -view.adjustedContentInset.top + 1
@@ -164,13 +210,32 @@ struct CollectionWall: UIViewRepresentable {
         }
         if coordinator.layoutID != layoutID, let collectionLayout = view.collectionViewLayout as? WallCollectionLayout {
             coordinator.layoutID = layoutID
+            // A new scale fades in over a picture of the old one, with a slight zoom.
+            var snapshot: UIView?
+            if animated, !collectionLayout.wall.elements.isEmpty, let picture = view.snapshotView(afterScreenUpdates: false) {
+                picture.frame = view.frame
+                container.addSubview(picture)
+                snapshot = picture
+            }
             collectionLayout.wall = layout
+            coordinator.moving = true
             view.reloadData()
             collectionLayout.invalidateLayout()
             view.layoutIfNeeded()
             if let y = layout.initialY {
                 let maxOffset = max(layout.height + view.adjustedContentInset.bottom - view.bounds.height, -view.adjustedContentInset.top)
                 view.setContentOffset(CGPoint(x: 0, y: min(y - view.adjustedContentInset.top, maxOffset)), animated: false)
+            }
+            coordinator.moving = false
+            if let snapshot {
+                view.alpha = 0
+                view.transform = CGAffineTransform(scaleX: 0.96, y: 0.96)
+                UIView.animate(withDuration: 0.34, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+                    snapshot.alpha = 0
+                    snapshot.transform = CGAffineTransform(scaleX: 1.04, y: 1.04)
+                    view.alpha = 1
+                    view.transform = .identity
+                } completion: { _ in snapshot.removeFromSuperview() }
             }
         }
         if coordinator.lastTopRequest != topRequest {
@@ -183,19 +248,24 @@ struct CollectionWall: UIViewRepresentable {
         var parent: CollectionWall
         var layoutID = -1
         var lastTopRequest = 0
+        /// True while the wall itself moves the content, so it is not taken for a gesture.
+        var moving = false
 
         init(_ parent: CollectionWall) { self.parent = parent }
 
-        private var wall: WallLayout { parent.layout }
+        private func wall(_ collectionView: UICollectionView) -> WallLayout {
+            (collectionView.collectionViewLayout as? WallCollectionLayout)?.wall ?? WallLayout()
+        }
 
         func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
-            (collectionView.collectionViewLayout as? WallCollectionLayout)?.wall.elements.count ?? 0
+            wall(collectionView).elements.count
         }
 
         func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "cell", for: indexPath)
-            guard let elements = (collectionView.collectionViewLayout as? WallCollectionLayout)?.wall.elements, indexPath.item < elements.count else { return cell }
-            let element = elements[indexPath.item]
+            let wall = wall(collectionView)
+            guard indexPath.item < wall.elements.count else { return cell }
+            let element = wall.elements[indexPath.item]
             switch element.kind {
             case .tile(let item, let corner):
                 let side = max(element.frame.width, element.frame.height)
@@ -245,8 +315,9 @@ struct CollectionWall: UIViewRepresentable {
             let maxDistance = max(0, scrollView.contentSize.height + scrollView.adjustedContentInset.top + scrollView.adjustedContentInset.bottom - scrollView.bounds.height)
             let distance = min(scrollView.contentOffset.y + scrollView.adjustedContentInset.top, maxDistance)
             parent.tracker.distance = distance
-            parent.tracker.topDate = wall.date(at: distance + 20)
-            parent.onScroll(distance)
+            if let collectionView = scrollView as? UICollectionView { parent.tracker.topDate = wall(collectionView).date(at: distance + 20) }
+            let user = !moving && (scrollView.isDragging || scrollView.isDecelerating)
+            parent.onScroll(distance, user)
         }
 
         @objc func refreshPulled(_ control: UIRefreshControl) {
@@ -257,8 +328,8 @@ struct CollectionWall: UIViewRepresentable {
         }
 
         private func element(_ collectionView: UICollectionView, _ indexPath: IndexPath) -> WallElement? {
-            guard let elements = (collectionView.collectionViewLayout as? WallCollectionLayout)?.wall.elements, indexPath.item < elements.count else { return nil }
-            return elements[indexPath.item]
+            let elements = wall(collectionView).elements
+            return indexPath.item < elements.count ? elements[indexPath.item] : nil
         }
     }
 }
@@ -298,12 +369,15 @@ struct LibraryView: View {
     @Binding var scale: TimeScale
     @Binding var compact: Bool
     var topRequest: Int
+    var jump: DateJump?
     var openSettings: () -> Void
+    var openNAS: () -> Void
     @State private var direction = BarDirection()
+    @State private var showInfo = false
 
     var body: some View {
-        PhotoWall(items: store.items, revision: store.revision, scale: $scale, topRequest: topRequest,
-                  onScroll: { direction.apply($0, to: $compact) }, refresh: { await store.refresh() }) {
+        PhotoWall(items: store.items, revision: store.revision, scale: $scale, topRequest: topRequest, jump: jump,
+                  onScroll: { direction.apply($0, user: $1, to: $compact) }, refresh: { await store.refresh() }) {
             header
         } empty: {
             empty
@@ -315,7 +389,13 @@ struct LibraryView: View {
             HStack {
                 Brand()
                 Spacer(minLength: 8)
-                StatusPill()
+                Button { showInfo = true } label: { StatusPill(short: true) }
+                    .buttonStyle(PressStyle())
+                    .accessibilityHint("Muestra el estado del NAS")
+                    .popover(isPresented: $showInfo) {
+                        NASInfoCard(openNAS: { showInfo = false; openNAS() })
+                            .presentationCompactAdaptation(.popover)
+                    }
             }
             ScanBanner()
         }
@@ -349,6 +429,70 @@ struct LibraryView: View {
     }
 }
 
+/// The card behind the NAS pill: state, route, space and the useful actions.
+struct NASInfoCard: View {
+    @EnvironmentObject var store: GalleryStore
+    var openNAS: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                NASBadge(size: 38)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(store.account == nil ? "Sin NAS" : store.nasLabel).font(.headline).foregroundStyle(Palette.ink)
+                    HStack(spacing: 6) {
+                        Circle().fill(store.nasState.color).frame(width: 8, height: 8)
+                        Text(store.nasState.shortLabel).font(.subheadline).foregroundStyle(Palette.secondary)
+                    }
+                }
+            }
+            if store.account != nil {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let route = store.routeLabel { info("Conexión", route) }
+                    if let space = store.spaceText { info("Espacio", space) }
+                    if let date = store.lastScan { info("Última búsqueda", date.formatted(.relative(presentation: .named))) }
+                    if let status = store.datesStatus { info("Fechas", status.replacingOccurrences(of: "Ordenando por fecha · ", with: "")) }
+                    if store.duplicatesHidden > 0 { info("Duplicados", "\(store.duplicatesHidden.formatted()) ocultos en Fototeca") }
+                }
+                VStack(spacing: 8) {
+                    action(store.scanning ? "Buscando…" : "Buscar fotos nuevas", "arrow.triangle.2.circlepath", primary: true) { store.scan() }
+                        .disabled(store.scanning)
+                    HStack(spacing: 8) {
+                        action("Probar", "antenna.radiowaves.left.and.right", primary: false) { Task { await store.checkConnection() } }
+                        action("Ir al NAS", "server.rack", primary: false, run: openNAS)
+                    }
+                }
+            } else {
+                Text("Conecta tu Synology en Configuración para ver sus fotos aquí.").font(.subheadline).foregroundStyle(Palette.secondary)
+            }
+        }
+        .padding(18)
+        .frame(width: 320)
+    }
+
+    private func info(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title).font(.subheadline).foregroundStyle(Palette.secondary)
+            Spacer(minLength: 10)
+            Text(value).font(.subheadline.weight(.medium)).foregroundStyle(Palette.ink).multilineTextAlignment(.trailing)
+        }
+    }
+
+    private func action(_ title: String, _ symbol: String, primary: Bool, run: @escaping () -> Void) -> some View {
+        Button(action: run) {
+            Label(title, systemImage: symbol)
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1).minimumScaleFactor(0.85)
+                .foregroundStyle(primary ? Color.white : Palette.accent)
+                .frame(maxWidth: .infinity).frame(height: 42)
+                .background {
+                    if primary { Capsule().fill(Palette.selection) } else { Capsule().fill(Palette.accent.opacity(0.1)) }
+                }
+        }
+        .buttonStyle(PressStyle())
+    }
+}
+
 /// Which bar to show, from the direction of the scroll: scrolling down into the photos
 /// shows Días · Meses · Años; scrolling up brings back the main bar, wherever you are.
 final class BarDirection {
@@ -357,11 +501,11 @@ final class BarDirection {
     private var goingDown = true
 
     /// True for the scale bar, false for the main bar, nil to leave it as it is.
-    func update(_ distance: CGFloat) -> Bool? {
+    func update(_ distance: CGFloat, user: Bool = true) -> Bool? {
         defer { last = distance }
         let delta = distance - last
-        // A jump (a new scale or a tap on Inicio) is not a gesture.
-        if abs(delta) > 400 { anchor = distance; return nil }
+        // A jump (a new scale, Ir a fecha or Inicio) is not a gesture.
+        if !user || abs(delta) > 400 { anchor = distance; return nil }
         if distance < 40 { anchor = distance; return false }
         if delta != 0, (delta > 0) != goingDown { goingDown = delta > 0; anchor = last }
         if goingDown && distance - anchor > 24 { return true }
@@ -369,13 +513,13 @@ final class BarDirection {
         return nil
     }
 
-    func apply(_ distance: CGFloat, to compact: Binding<Bool>) {
-        guard let next = update(distance), next != compact.wrappedValue else { return }
+    func apply(_ distance: CGFloat, user: Bool, to compact: Binding<Bool>) {
+        guard let next = update(distance, user: user), next != compact.wrappedValue else { return }
         withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) { compact.wrappedValue = next }
     }
 }
 
-/// «Buscando fotos en el NAS…» or «Ordenando por fecha de captura…» while it works.
+/// «Buscando fotos en el NAS…» or «Ordenando por fecha…» while it works.
 struct ScanBanner: View {
     @EnvironmentObject var store: GalleryStore
     var body: some View {
@@ -390,7 +534,7 @@ struct ScanBanner: View {
     }
 }
 
-/// «Hoy · 12 fotos» over a day, or «Mayo 2024 ›» over a month.
+/// «Hoy · 12 fotos» over a day.
 struct SectionHeader: View {
     var section: TimelineSection
     var scale: TimeScale
@@ -398,46 +542,101 @@ struct SectionHeader: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(section.title)
-                .font(scale == .months ? .title3.weight(.bold) : .headline)
+                .font(.headline)
                 .foregroundStyle(Palette.ink)
                 .lineLimit(1)
             Text(mediaSummary(section.items)).font(.caption).foregroundStyle(Palette.secondary).lineLimit(1)
             Spacer(minLength: 0)
-            if scale == .months { Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(Palette.secondary) }
         }
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
         .padding(.bottom, 8)
         .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(scale == .months ? .isButton : .isHeader)
+        .accessibilityAddTraits(.isHeader)
     }
 }
 
-/// One month in Meses or one year in Años: a large photo with its title over it.
+/// A month in Meses or a year in Años: its title and a summary over a collage of one large
+/// photo and four small ones picked across the period.
 struct PeriodCard: View {
     var section: TimelineSection
     var scale: TimeScale
 
-    private var cover: GalleryItem? {
-        section.items.first { $0.favorite && !$0.isVideo } ?? section.items.first { !$0.isVideo } ?? section.items.first
+    private var picks: [GalleryItem] { PeriodCard.highlights(section.items, count: 5) }
+
+    private var summary: String {
+        let days = Set(section.items.map { Calendar.current.ordinality(of: .day, in: .era, for: $0.date) ?? 0 }).count
+        let unit = scale == .years ? countText(Set(section.items.map { Calendar.current.component(.month, from: $0.date) }).count, "mes", "meses")
+                                   : countText(days, "día", "días")
+        return mediaSummary(section.items) + " · " + unit
     }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(section.title)
+                    .font(.system(size: scale == .years ? 30 : 22, weight: .bold))
+                    .foregroundStyle(Palette.ink)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(Palette.secondary)
+            }
+            Text(summary).font(.footnote).foregroundStyle(Palette.secondary).lineLimit(1).padding(.top, -6)
+            collage
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(Color.white, lineWidth: 1))
+        .shadow(color: Palette.accent.opacity(0.07), radius: 10, y: 4)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(section.title), \(summary)")
+        .accessibilityAddTraits(.isButton)
+    }
+
+    private var collage: some View {
         GeometryReader { geo in
-            ZStack(alignment: .bottomLeading) {
-                if let cover { Thumbnail(item: cover, pixelSize: geo.size.width).frame(width: geo.size.width, height: geo.size.height) }
-                LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .center, endPoint: .bottom)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(section.title).font(.system(size: scale == .years ? 40 : 30, weight: .bold)).lineLimit(1).minimumScaleFactor(0.7)
-                    Text(mediaSummary(section.items)).font(.subheadline.weight(.medium)).opacity(0.9)
+            let gap: CGFloat = 4
+            let picks = self.picks
+            let bigWidth = picks.count > 1 ? (geo.size.width * 0.58).rounded() : geo.size.width
+            let smallWidth = ((geo.size.width - bigWidth - gap * 2) / 2).rounded(.down)
+            let smallHeight = ((geo.size.height - gap) / 2).rounded(.down)
+            HStack(spacing: gap) {
+                if let first = picks.first { tile(first, CGSize(width: bigWidth, height: geo.size.height)) }
+                if picks.count > 1 {
+                    VStack(spacing: gap) {
+                        HStack(spacing: gap) {
+                            ForEach(Array(picks.dropFirst().prefix(2))) { tile($0, CGSize(width: smallWidth, height: smallHeight)) }
+                        }
+                        HStack(spacing: gap) {
+                            ForEach(Array(picks.dropFirst(3).prefix(2))) { tile($0, CGSize(width: smallWidth, height: smallHeight)) }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
-                .foregroundStyle(.white)
-                .padding(20)
             }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(section.title), \(mediaSummary(section.items))")
-        .accessibilityAddTraits(.isButton)
+    }
+
+    private func tile(_ item: GalleryItem, _ size: CGSize) -> some View {
+        Thumbnail(item: item, pixelSize: max(size.width, size.height))
+            .frame(width: size.width, height: size.height)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    /// Favorites first, then photos spread evenly across the period.
+    static func highlights(_ items: [GalleryItem], count: Int) -> [GalleryItem] {
+        let photos = items.filter { !$0.isVideo }
+        let pool = photos.isEmpty ? items : photos
+        guard pool.count > count else { return pool }
+        var picks = Array(pool.filter(\.favorite).prefix(1))
+        let step = Double(pool.count) / Double(count)
+        var index = 0
+        while picks.count < count && index < count * 2 {
+            let candidate = pool[min(pool.count - 1, Int(Double(index) * step + step / 2))]
+            if !picks.contains(where: { $0.id == candidate.id }) { picks.append(candidate) }
+            index += 1
+        }
+        return picks
     }
 }

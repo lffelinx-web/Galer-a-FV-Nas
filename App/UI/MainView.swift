@@ -4,13 +4,13 @@ enum AppTab: String, CaseIterable, Identifiable {
     case library, nas, albums, settings
     var id: String { rawValue }
     var title: String {
-        switch self { case .library: return "Fototeca"; case .nas: return "NAS"; case .albums: return "Álbumes"; case .settings: return "Configuración" }
+        switch self { case .library: return "Fototeca"; case .nas: return "NAS"; case .albums: return "Espacio"; case .settings: return "Configuración" }
     }
     var symbol: String {
-        switch self { case .library: return "photo"; case .nas: return "server.rack"; case .albums: return "rectangle.stack"; case .settings: return "gearshape" }
+        switch self { case .library: return "photo"; case .nas: return "server.rack"; case .albums: return "square.grid.2x2"; case .settings: return "gearshape" }
     }
     var selectedSymbol: String {
-        switch self { case .library: return "photo.fill"; case .nas: return "server.rack"; case .albums: return "rectangle.stack.fill"; case .settings: return "gearshape.fill" }
+        switch self { case .library: return "photo.fill"; case .nas: return "server.rack"; case .albums: return "square.grid.2x2.fill"; case .settings: return "gearshape.fill" }
     }
 }
 
@@ -25,9 +25,15 @@ struct MainView: View {
     @State private var compact = false
     @State private var libraryTop = 0
     @State private var nasTop = 0
+    @State private var libraryJump: DateJump?
+    @State private var nasJump: DateJump?
+    @State private var choosingDate = false
     @State private var opened: Set<AppTab> = [.library]
     @Namespace private var glass
     @Namespace private var lens
+
+    /// Both bars share this height, so changing from one to the other is a smooth morph.
+    static let barHeight: CGFloat = 62
 
     /// Fototeca and NAS both split their bar while scrolling down through the photos.
     private var showCompact: Bool { (tab == .library || tab == .nas) && compact }
@@ -62,27 +68,33 @@ struct MainView: View {
             }
         }
         .fullScreenCover(item: $store.viewer) { ViewerView(context: $0).environmentObject(store) }
+        .sheet(isPresented: $choosingDate) {
+            DateJumpSheet(items: tab == .nas ? store.nasShown : store.items) { date in
+                if tab == .nas { nasJump = DateJump(date: date) } else { libraryJump = DateJump(date: date) }
+            }
+        }
     }
 
     @ViewBuilder private func screen(_ item: AppTab) -> some View {
         switch item {
-        case .library: LibraryView(scale: $libraryScale, compact: $compact, topRequest: libraryTop, openSettings: { select(.settings) })
-        case .nas: NASView(scale: $nasScale, compact: $compact, topRequest: nasTop, openSettings: { select(.settings) })
-        case .albums: AlbumsView()
+        case .library: LibraryView(scale: $libraryScale, compact: $compact, topRequest: libraryTop, jump: libraryJump,
+                                   openSettings: { select(.settings) }, openNAS: { select(.nas) })
+        case .nas: NASView(scale: $nasScale, compact: $compact, topRequest: nasTop, jump: nasJump, openSettings: { select(.settings) })
+        case .albums: SpaceView()
         case .settings: SettingsView()
         }
     }
 
     private var bar: some View {
         GlassGroup(spacing: 16) {
-            HStack(spacing: 10) {
+            HStack(spacing: 0) {
                 if showCompact {
-                    GlassCircleButton(systemImage: "house.fill", label: "Inicio", id: "home", namespace: glass, size: 56) { goHome() }
-                    Spacer(minLength: 0)
+                    GlassCircleButton(systemImage: "house.fill", label: "Inicio", id: "home", namespace: glass, size: Self.barHeight) { goHome() }
+                    Spacer(minLength: 6)
                     ScaleSwitcher(scale: tab == .nas ? $nasScale : $libraryScale, namespace: lens)
                         .glassPiece(Capsule(), id: "bar", in: glass)
-                    Spacer(minLength: 0)
-                    GlassCircleButton(systemImage: "gearshape.fill", label: "Configuración", id: "gear", namespace: glass, size: 56) { select(.settings) }
+                    Spacer(minLength: 6)
+                    GlassCircleButton(systemImage: "calendar", label: "Ir a fecha", id: "gear", namespace: glass, size: Self.barHeight) { choosingDate = true }
                 } else {
                     FullTabBar(tab: tab, namespace: lens, select: select)
                         .glassPiece(Capsule(), id: "bar", in: glass)
@@ -128,15 +140,15 @@ struct FullTabBar: View {
             ForEach(AppTab.allCases) { item in
                 let selected = item == tab
                 Button { select(item) } label: {
-                    VStack(spacing: 4) {
+                    VStack(spacing: 2) {
                         Image(systemName: selected ? item.selectedSymbol : item.symbol)
                             .symbolRenderingMode(.monochrome)
-                            .font(.system(size: 20, weight: .semibold))
-                            .frame(height: 24)
-                        Text(item.title).font(.system(size: 11.5, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.75)
+                            .font(.system(size: 18, weight: .semibold))
+                            .frame(height: 22)
+                        Text(item.title).font(.system(size: 10.5, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.75)
                     }
                     .foregroundStyle(selected ? Color.white : Palette.ink)
-                    .frame(maxWidth: .infinity).frame(height: 60)
+                    .frame(maxWidth: .infinity).frame(height: MainView.barHeight - 10)
                     .selectionLens(selected, in: namespace)
                     .contentShape(Capsule())
                 }
@@ -145,7 +157,7 @@ struct FullTabBar: View {
             }
         }
         .padding(5)
-        .frame(height: 70)
+        .frame(height: MainView.barHeight)
     }
 }
 
@@ -166,7 +178,7 @@ struct ScaleSwitcher: View {
                         .lineLimit(1)
                         .fixedSize()
                         .foregroundStyle(selected ? Color.white : Palette.ink)
-                        .padding(.horizontal, 13).frame(height: 46)
+                        .padding(.horizontal, 11).frame(height: MainView.barHeight - 10)
                         .selectionLens(selected, in: namespace)
                         .contentShape(Capsule())
                 }
@@ -175,7 +187,7 @@ struct ScaleSwitcher: View {
             }
         }
         .padding(5)
-        .frame(height: 56)
+        .frame(height: MainView.barHeight)
         .fixedSize(horizontal: true, vertical: false)
         .sensoryFeedback(.selection, trigger: scale)
     }

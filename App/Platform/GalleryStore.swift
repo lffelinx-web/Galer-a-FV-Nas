@@ -1,5 +1,7 @@
 import Foundation
 import SwiftUI
+import Photos
+import UIKit
 
 enum NASState: Equatable {
     case notConfigured, checking, connected, offline
@@ -12,11 +14,36 @@ enum NASState: Equatable {
         case .offline: return "NAS sin conexión"
         }
     }
+
+    var shortLabel: String {
+        switch self {
+        case .notConfigured: return "Sin configurar"
+        case .checking: return "Conectando…"
+        case .connected: return "Conectado"
+        case .offline: return "Sin conexión"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .connected: return Palette.online
+        case .checking: return Palette.warning
+        case .offline: return .red
+        case .notConfigured: return .gray
+        }
+    }
 }
 
 /// The NAS account for code that should not observe the whole store, such as tiles.
 enum ActiveAccount {
     static var current: NASAccount?
+}
+
+/// Space on the NAS share, when the NAS reports it over WebDAV.
+struct NASSpace: Equatable {
+    var used: Int64?
+    var available: Int64?
+    var total: Int64? { used.flatMap { used in available.map { used + $0 } } }
 }
 
 struct ViewerContext: Identifiable {
@@ -66,6 +93,17 @@ final class GalleryStore: ObservableObject {
         didSet { UserDefaults.standard.set(hideDuplicates, forKey: "hideDuplicates"); merge() }
     }
     @Published private(set) var duplicatesHidden = 0
+    /// NAS copies of iPhone photos hidden from Fototeca.
+    @Published private(set) var duplicateIDs: [String] = []
+    /// NAS items shown in the NAS tab: everything except what is hidden.
+    @Published private(set) var nasShown: [GalleryItem] = []
+    @Published private(set) var nasSpace: NASSpace?
+    /// Files that appeared in the latest NAS search.
+    @Published private(set) var lastAdded: [String] = []
+    @Published private(set) var favorites: Set<String> = []
+    @Published private(set) var hidden: Set<String> = []
+    /// Capture dates read so far, for the summary.
+    @Published private(set) var datesRead = 0
 
     /// Every known item by id, whatever the Fototeca filters, for albums.
     private(set) var itemIndex: [String: GalleryItem] = [:]
@@ -81,12 +119,16 @@ final class GalleryStore: ObservableObject {
     private var aspectsName: String { "aspects-" + String(Files.key(account?.scope ?? "none").prefix(16)) + ".json" }
     private var capturedName: String { "captured-" + String(Files.key(account?.scope ?? "none").prefix(16)) + ".json" }
     private let albumsName = "albums.json"
+    private let favoritesName = "favorites.json"
+    private let hiddenName = "hidden.json"
 
     init() {
         account = AccountKeychain.load()
         ActiveAccount.current = account
         photoAccess = PhoneLibrary.access
         albums = Files.load(albumsName, as: [AppAlbum].self) ?? []
+        favorites = Files.load(favoritesName, as: Set<String>.self) ?? []
+        hidden = Files.load(hiddenName, as: Set<String>.self) ?? []
         if account != nil { nasState = .checking }
         // Photos posts many changes in a row (iCloud, edits); wait for them to settle.
         PhoneLibrary.shared.onChange = { [weak self] in self?.schedulePhoneReload() }
@@ -99,6 +141,23 @@ final class GalleryStore: ObservableObject {
         case .connected, .checking, .offline: return nasState.label + " • " + nasLabel
         case .notConfigured: return nasState.label
         }
+    }
+
+    /// «1.2 TB libres de 4 TB», when the NAS reports its space.
+    var spaceText: String? {
+        guard let available = nasSpace?.available else { return nil }
+        let free = ByteCountFormatter.string(fromByteCount: available, countStyle: .file) + " libres"
+        guard let total = nasSpace?.total, total > 0 else { return free }
+        return free + " de " + ByteCountFormatter.string(fromByteCount: total, countStyle: .file)
+    }
+
+    /// The NAS line under its title: free space, then what is new or when it was last searched.
+    var nasDetail: String {
+        var parts: [String] = []
+        if let available = nasSpace?.available { parts.append(ByteCountFormatter.string(fromByteCount: available, countStyle: .file) + " libres") }
+        if !lastAdded.isEmpty { parts.append(countText(lastAdded.count, "nueva", "nuevas")) }
+        else if let lastScan { parts.append("revisado " + lastScan.formatted(.relative(presentation: .named))) }
+        return parts.joined(separator: " · ")
     }
 
     var routeLabel: String? {
@@ -123,6 +182,19 @@ final class GalleryStore: ObservableObject {
     func refresh() async {
         await reloadPhone()
         await checkConnection()
+    }
+
+    /// Back from the background: check the NAS and pick up the capture dates where they stopped.
+    func resume() async {
+        guard loaded else { return }
+        await checkConnection()
+        if nasState == .connected { readCaptureDates() }
+    }
+
+    /// Going to the background: keep what was read so far.
+    func suspend() async {
+        await saveLearned()
+        saveCaptured()
     }
 
     // MARK: iPhone
@@ -185,8 +257,8 @@ final class GalleryStore: ObservableObject {
     func disconnect() {
         do { try AccountKeychain.clear() } catch { self.error = error.localizedDescription; return }
         scanTask?.cancel(); scanning = false; scanStatus = nil
-        datesTask?.cancel(); datesTask = nil; datesStatus = nil; captured = [:]
-        account = nil; nasItems = []; lastScan = nil; lastRoute = nil; nasState = .notConfigured
+        datesTask?.cancel(); datesTask = nil; datesStatus = nil; captured = [:]; datesRead = 0
+        account = nil; nasItems = []; lastScan = nil; lastRoute = nil; nasState = .notConfigured; nasSpace = nil; lastAdded = []
         merge()
     }
 
@@ -198,6 +270,9 @@ final class GalleryStore: ObservableObject {
             guard self.account?.scope == account.scope else { return }
             lastRoute = response.route
             nasState = response.status == 207 ? .connected : .offline
+            if nasState == .connected, let space = try? await NASTransport(account).space(account.root), self.account?.scope == account.scope {
+                nasSpace = space
+            }
         } catch {
             guard self.account?.scope == account.scope else { return }
             nasState = .offline
@@ -220,8 +295,13 @@ final class GalleryStore: ObservableObject {
                 let found = await Task.detached(priority: .userInitiated) { Self.applying(known, to: scanned) }.value
                 guard self.account?.scope == account.scope else { return }
                 let scannedAt = Date()
+                // What is new since the previous search, when there was one.
+                let previous = Set(nasItems.map(\.id))
+                let added: [String] = previous.isEmpty ? [] : found.filter { !previous.contains($0.id) }.map(\.id)
+                lastAdded = added
                 nasItems = found; lastScan = scannedAt; nasState = .connected; scanStatus = nil
-                Task.detached(priority: .utility) { try? Files.save(NASIndex(items: scanned, scanned: scannedAt), name: name) }
+                let addedIDs = lastAdded
+                Task.detached(priority: .utility) { try? Files.save(NASIndex(items: scanned, scanned: scannedAt, added: addedIDs), name: name) }
                 merge()
                 scanning = false
                 readCaptureDates()
@@ -258,8 +338,10 @@ final class GalleryStore: ObservableObject {
         }.value
         learnedAspects = aspects
         self.captured = captured
+        datesRead = captured.count
         nasItems = index.items
         lastScan = index.scanned
+        lastAdded = index.added ?? []
         merge()
     }
 
@@ -277,22 +359,26 @@ final class GalleryStore: ObservableObject {
     // MARK: Capture dates
 
     /// Reads, in the background, when each NAS photo was really taken and reorders the
-    /// NAS by that date. Already read files are remembered, so it only runs once per file.
+    /// NAS by that date. Progress is saved as it goes and resumes after the app is closed,
+    /// so each file is read only once.
     func readCaptureDates() {
         guard let account, datesTask == nil, !scanning else { return }
         let known = captured
         let pending = nasItems.filter { known[$0.id] == nil }
-        guard !pending.isEmpty else { return }
-        let total = pending.count
-        datesStatus = "Ordenando por fecha de captura…"
+        let total = nasItems.count
+        datesRead = total - pending.count
+        guard !pending.isEmpty else { datesStatus = nil; return }
+        datesStatus = datesText(datesRead, total)
         datesTask = Task {
+            let background = BackgroundWork(name: "Fechas de captura")
+            defer { background.end() }
             let transport = NASTransport(account)
-            var batch: [String: CaptureInfo] = [:]
-            var done = 0, failures = 0
-            var lastApply = Date()
+            var failures = 0, sinceSave = 0, sinceReorder = 0
+            var read = self.datesRead
+            var lastReorder = Date()
             var start = 0
-            while start < total, !Task.isCancelled {
-                let chunk = Array(pending[start..<min(start + 4, total)])
+            while start < pending.count, !Task.isCancelled {
+                let chunk = Array(pending[start..<min(start + 4, pending.count)])
                 start += chunk.count
                 let results = await withTaskGroup(of: (String, CaptureInfo?).self) { group -> [(String, CaptureInfo?)] in
                     for item in chunk { group.addTask { (item.id, await CaptureReader.read(item, transport: transport)) } }
@@ -300,37 +386,49 @@ final class GalleryStore: ObservableObject {
                     for await result in group { out.append(result) }
                     return out
                 }
+                guard !Task.isCancelled, self.account?.scope == account.scope else { return }
                 for (id, info) in results {
-                    if let info { batch[id] = info; failures = 0 } else { failures += 1 }
+                    if let info { captured[id] = info; failures = 0; sinceSave += 1; sinceReorder += 1; read += 1 } else { failures += 1 }
                 }
-                done += chunk.count
-                // The NAS stopped answering: try again on the next launch.
+                // The NAS stopped answering: stop here and resume when the app comes back.
                 if failures >= 12 { break }
-                if done % 200 == 0 || done == total {
-                    datesStatus = "Ordenando por fecha de captura · \(done.formatted()) de \(total.formatted())"
-                }
+                if sinceSave >= 300 { saveCaptured(); sinceSave = 0 }
+                // Published every hundred files, not on each one, to keep the screen calm.
+                if read / 100 != (read - chunk.count) / 100 { datesRead = read; datesStatus = datesText(read, total) }
                 // Reorder now and then, not on every file, so the wall does not keep moving.
-                if Date().timeIntervalSince(lastApply) > 180 {
-                    await applyCaptured(batch); batch = [:]; lastApply = Date()
+                if sinceReorder > 0, Date().timeIntervalSince(lastReorder) > 180 {
+                    await reorderByCapture(); sinceReorder = 0; lastReorder = Date()
                 }
             }
             guard !Task.isCancelled else { return }
-            await applyCaptured(batch)
+            saveCaptured()
+            datesRead = read
+            if sinceReorder > 0 { await reorderByCapture() }
             datesStatus = nil
             datesTask = nil
         }
     }
 
-    private func applyCaptured(_ new: [String: CaptureInfo]) async {
-        guard !new.isEmpty, account != nil else { return }
-        captured.merge(new) { _, latest in latest }
-        let (all, items, name) = (captured, nasItems, capturedName)
-        let sorted = await Task.detached(priority: .userInitiated) { () -> [GalleryItem] in
-            try? Files.save(all, name: name)
-            return Self.applying(all, to: items)
-        }.value
+    private func datesText(_ done: Int, _ total: Int) -> String {
+        "Ordenando por fecha · \(done.formatted()) de \(total.formatted())"
+    }
+
+    private func saveCaptured() {
+        guard account != nil, !captured.isEmpty else { return }
+        let (all, name) = (captured, capturedName)
+        Task.detached(priority: .utility) { try? Files.save(all, name: name) }
+    }
+
+    private func reorderByCapture() async {
+        let (all, items) = (captured, nasItems)
+        let sorted = await Task.detached(priority: .userInitiated) { Self.applying(all, to: items) }.value
         nasItems = sorted
         merge()
+    }
+
+    /// NAS files that were read but carry no capture date.
+    var undatedItems: [GalleryItem] {
+        captured.compactMap { $0.value.date == nil ? itemIndex[$0.key] : nil }.sorted { $0.date > $1.date }
     }
 
     nonisolated static func applying(_ captured: [String: CaptureInfo], to items: [GalleryItem]) -> [GalleryItem] {
@@ -349,17 +447,19 @@ final class GalleryStore: ObservableObject {
 
     private func merge() {
         let phone = phoneItems, nas = nasItems
-        let (usePhone, useNAS, dedupe) = (showPhone, showNAS, hideDuplicates)
+        let (usePhone, useNAS, dedupe, secret) = (showPhone, showNAS, hideDuplicates, hidden)
         let checked = Set(captured.compactMap { $0.value.date == nil ? nil : $0.key })
         mergeTask?.cancel()
         mergeTask = Task {
-            let (merged, index, hidden) = await Task.detached(priority: .userInitiated) { () -> ([GalleryItem], [String: GalleryItem], Int) in
-                let a = usePhone ? phone : []
-                var b = useNAS ? nas : []
-                var hidden = 0
+            let (merged, index, duplicates, nasVisible) = await Task.detached(priority: .userInitiated) { () -> ([GalleryItem], [String: GalleryItem], [String], [GalleryItem]) in
+                let nasVisible = secret.isEmpty ? nas : nas.filter { !secret.contains($0.id) }
+                let a = usePhone ? (secret.isEmpty ? phone : phone.filter { !secret.contains($0.id) }) : []
+                var b = useNAS ? nasVisible : []
+                var duplicates: [String] = []
                 if dedupe && !a.isEmpty && !b.isEmpty {
                     let unique = Self.removingDuplicates(b, of: a, checked: checked)
-                    hidden = b.count - unique.count
+                    let kept = Set(unique.map(\.id))
+                    duplicates = b.lazy.filter { !kept.contains($0.id) }.map(\.id)
                     b = unique
                 }
                 let merged: [GalleryItem]
@@ -370,10 +470,12 @@ final class GalleryStore: ObservableObject {
                 index.reserveCapacity(phone.count + nas.count)
                 for item in phone { index[item.id] = item }
                 for item in nas { index[item.id] = item }
-                return (merged, index, hidden)
+                return (merged, index, duplicates, nasVisible)
             }.value
             guard !Task.isCancelled else { return }
-            duplicatesHidden = hidden
+            duplicateIDs = duplicates
+            duplicatesHidden = duplicates.count
+            nasShown = nasVisible
             items = merged
             itemIndex = index
             revision += 1
@@ -407,6 +509,72 @@ final class GalleryStore: ObservableObject {
         let position = list.firstIndex { $0.id == item.id } ?? 0
         let window = list.isEmpty ? [item] : Array(list[max(0, position - 400)..<min(list.count, position + 400)])
         viewer = ViewerContext(items: window, start: item.id)
+    }
+
+    // MARK: Favorites and hidden
+
+    func isFavorite(_ item: GalleryItem) -> Bool { favorites.contains(item.id) || (item.favorite && !favorites.contains("-" + item.id)) }
+
+    /// Favorites live in the app; an iPhone favorite can be unmarked here without touching the library.
+    func toggleFavorite(_ item: GalleryItem) {
+        if isFavorite(item) {
+            favorites.remove(item.id)
+            if item.favorite { favorites.insert("-" + item.id) }
+        } else {
+            favorites.remove("-" + item.id)
+            if !item.favorite { favorites.insert(item.id) }
+        }
+        save(favorites, as: favoritesName)
+    }
+
+    var favoriteItems: [GalleryItem] {
+        itemIndex.values.filter { isFavorite($0) && !hidden.contains($0.id) }.sorted { $0.date > $1.date }
+    }
+
+    func isHidden(_ item: GalleryItem) -> Bool { hidden.contains(item.id) }
+
+    func setHidden(_ item: GalleryItem, _ value: Bool) {
+        if value { hidden.insert(item.id) } else { hidden.remove(item.id) }
+        save(hidden, as: hiddenName)
+        merge()
+    }
+
+    var hiddenItems: [GalleryItem] { hidden.compactMap { itemIndex[$0] }.sorted { $0.date > $1.date } }
+
+    /// Every item, iPhone and NAS, without the hidden ones.
+    var allVisible: [GalleryItem] { itemIndex.values.filter { !hidden.contains($0.id) } }
+
+    private func save<T: Encodable>(_ value: T, as name: String) {
+        do { try Files.save(value, name: name) } catch { self.error = "No se pudo guardar el cambio." }
+    }
+
+    // MARK: Collections
+
+    /// The items of an automatic collection in Espacio, newest first.
+    func items(for collection: SmartCollection) async -> [GalleryItem] {
+        let newest: (GalleryItem, GalleryItem) -> Bool = { $0.date > $1.date }
+        switch collection {
+        case .favorites: return favoriteItems
+        case .duplicates: return duplicateIDs.compactMap { itemIndex[$0] }.sorted(by: newest)
+        case .undated: return undatedItems
+        case .selfies:
+            return await PhoneLibrary.shared.ids(in: .smartAlbumSelfPortraits).compactMap { itemIndex[$0] }.filter { !hidden.contains($0.id) }
+        case .recent:
+            let phone = await PhoneLibrary.shared.ids(in: .smartAlbumRecentlyAdded, limit: 300)
+            return (lastAdded + phone).compactMap { itemIndex[$0] }.filter { !hidden.contains($0.id) }.sorted(by: newest)
+        case .videos, .livePhotos, .screenshots, .raw:
+            let all = allVisible
+            return await Task.detached(priority: .userInitiated) { () -> [GalleryItem] in
+                let matching: [GalleryItem]
+                switch collection {
+                case .videos: matching = all.filter(\.isVideo)
+                case .livePhotos: matching = all.filter { $0.kind == .livePhoto }
+                case .screenshots: matching = all.filter(\.isScreenshot)
+                default: matching = all.filter(\.isRAW)
+                }
+                return matching.sorted { $0.date > $1.date }
+            }.value
+        }
     }
 
     // MARK: Albums

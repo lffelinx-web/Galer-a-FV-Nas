@@ -278,6 +278,23 @@ final class NASTransport: @unchecked Sendable {
 }
 
 extension NASTransport {
+    /// Used and free space of the share (RFC 4331 quota properties), when the NAS reports them.
+    func space(_ folder: URL) async throws -> NASSpace? {
+        let xml = Data("<?xml version=\"1.0\"?><d:propfind xmlns:d=\"DAV:\"><d:prop><d:quota-available-bytes/><d:quota-used-bytes/></d:prop></d:propfind>".utf8)
+        let response = try await request(folder, method: "PROPFIND", headers: ["Depth": "0", "Content-Type": "application/xml; charset=utf-8"], body: xml, limit: 200_000)
+        guard response.status == 207, let text = String(data: response.data, encoding: .utf8) else { return nil }
+        return Self.parseSpace(text)
+    }
+
+    static func parseSpace(_ xml: String) -> NASSpace? {
+        func value(_ name: String) -> Int64? {
+            guard let range = xml.range(of: "\(name)[^>]*>\\s*(\\d+)\\s*<", options: .regularExpression) else { return nil }
+            return Int64(xml[range].filter(\.isNumber))
+        }
+        let space = NASSpace(used: value("quota-used-bytes"), available: value("quota-available-bytes"))
+        return space.used == nil && space.available == nil ? nil : space
+    }
+
     /// Copies a file to disk in bounded ranges, so a long video never has to fit in memory.
     func download(_ url: URL, to destination: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
         let chunk = 8 * 1_048_576

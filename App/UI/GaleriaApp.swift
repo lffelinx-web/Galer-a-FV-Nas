@@ -18,8 +18,8 @@ struct LFAZGaleriaApp: App {
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
-            case .background: Task { await store.saveLearned() }
-            case .active: Task { await store.checkConnection() }
+            case .background: Task { await store.suspend() }
+            case .active: Task { await store.resume() }
             default: break
             }
         }

@@ -60,25 +60,38 @@ struct Brand: View {
 }
 
 /// «● NAS conectado • DS120j».
+/// «● NAS conectado • DS120j», or just «● DS120j ⌄» where space is short (it opens details).
 struct StatusPill: View {
     @EnvironmentObject var store: GalleryStore
+    var short = false
+
     var body: some View {
         HStack(spacing: 7) {
-            Circle().fill(color).frame(width: 8, height: 8)
-                .overlay(Circle().stroke(color.opacity(0.35), lineWidth: 3))
-            Text(store.statusText).font(.system(size: 13, weight: .medium)).foregroundStyle(Palette.ink.opacity(0.85)).lineLimit(1)
+            Circle().fill(store.nasState.color).frame(width: 8, height: 8)
+                .overlay(Circle().stroke(store.nasState.color.opacity(0.35), lineWidth: 3))
+            Text(short ? (store.account == nil ? "Sin NAS" : store.nasLabel) : store.statusText)
+                .font(.system(size: 13, weight: .medium)).foregroundStyle(Palette.ink.opacity(0.85)).lineLimit(1)
+            if short { Image(systemName: "chevron.down").font(.system(size: 10, weight: .bold)).foregroundStyle(Palette.secondary) }
         }
+        .fixedSize()
         .padding(.horizontal, 12).frame(height: 32)
         .liquidCapsule()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(store.statusText)
     }
+}
 
-    private var color: Color {
-        switch store.nasState {
-        case .connected: return Palette.online
-        case .checking: return Palette.warning
-        case .offline: return .red
-        case .notConfigured: return .gray
-        }
+/// The NAS icon: a server on a blue tile.
+struct NASBadge: View {
+    var size: CGFloat = 40
+    var body: some View {
+        Image(systemName: "server.rack")
+            .font(.system(size: size * 0.42, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(Palette.selection, in: RoundedRectangle(cornerRadius: size * 0.28, style: .continuous))
+            .shadow(color: Palette.accent.opacity(0.25), radius: 6, y: 3)
+            .accessibilityHidden(true)
     }
 }
 

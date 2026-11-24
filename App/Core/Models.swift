@@ -54,6 +54,8 @@ struct GalleryItem: Identifiable, Hashable, Codable {
     /// For NAS files, the folder relative to the shared root, such as `2023/Vacaciones`.
     var folder: String?
     var favorite = false
+    /// Set for iPhone screenshots; NAS files are recognized by name.
+    var screenshot: Bool?
 
     var isVideo: Bool { kind == .video }
     var isNAS: Bool { if case .nas = source { return true } else { return false } }
@@ -61,11 +63,18 @@ struct GalleryItem: Identifiable, Hashable, Codable {
     var phoneID: String? { if case .phone(let id) = source { return id } else { return nil } }
     var fileExtension: String { nasURL?.pathExtension.lowercased() ?? "" }
     var isRAW: Bool { MediaFormat.raw.contains(fileExtension) }
+    var isScreenshot: Bool {
+        if let screenshot { return screenshot }
+        let lower = name.lowercased()
+        return lower.contains("screenshot") || lower.contains("screen shot") || lower.contains("captura de pantalla")
+    }
 }
 
 struct NASIndex: Codable {
     var items: [GalleryItem] = []
     var scanned: Date?
+    /// Ids that were new in that search.
+    var added: [String]?
 }
 
 enum GalleryError: LocalizedError {

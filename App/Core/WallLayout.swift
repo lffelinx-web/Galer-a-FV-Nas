@@ -72,7 +72,7 @@ struct WallLayout {
                     y += block.height + spacing
                 }
             case .months, .years:
-                let cardHeight: CGFloat = scale == .years ? 240 : 190
+                let cardHeight: CGFloat = scale == .years ? 300 : 232
                 if y == 0 { y = 6 }
                 add([WallElement(kind: .card(section), frame: CGRect(x: pad + 4, y: y, width: inner - 8, height: cardHeight), date: section.date)],
                     top: y, bottom: y + cardHeight + 12)
@@ -86,6 +86,11 @@ struct WallLayout {
             layout.initialY = layout.sectionTop[section.id]
         }
         return layout
+    }
+
+    /// Where the section that holds `date` starts, or the closest one before it.
+    func top(for date: Date, calendar: Calendar = .current) -> CGFloat? {
+        Timeline.section(containing: date, in: sections, scale: scale, calendar: calendar).flatMap { sectionTop[$0.id] }
     }
 
     /// The first band that reaches `y`.

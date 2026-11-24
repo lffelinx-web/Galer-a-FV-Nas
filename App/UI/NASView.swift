@@ -7,12 +7,13 @@ struct NASView: View {
     @Binding var scale: TimeScale
     @Binding var compact: Bool
     var topRequest: Int
+    var jump: DateJump?
     var openSettings: () -> Void
     @State private var direction = BarDirection()
 
     var body: some View {
-        PhotoWall(items: store.nasItems, revision: store.nasRevision, scale: $scale, topRequest: topRequest,
-                  onScroll: { direction.apply($0, to: $compact) }, refresh: { await store.checkConnection() }) {
+        PhotoWall(items: store.nasShown, revision: store.revision, scale: $scale, topRequest: topRequest, jump: jump,
+                  onScroll: { direction.apply($0, user: $1, to: $compact) }, refresh: { await store.checkConnection() }) {
             header
         } empty: {
             empty
@@ -28,8 +29,9 @@ struct NASView: View {
             }
             HStack(spacing: 10) {
                 StatusPill()
-                if !store.nasItems.isEmpty {
-                    Text(mediaSummary(store.nasItems)).font(.footnote).foregroundStyle(Palette.secondary).lineLimit(1).minimumScaleFactor(0.8)
+                // Free space and what is new, more useful than totals (those are in Espacio).
+                if !store.nasDetail.isEmpty {
+                    Text(store.nasDetail).font(.footnote).foregroundStyle(Palette.secondary).lineLimit(1).minimumScaleFactor(0.75)
                 }
             }
             ScanBanner()

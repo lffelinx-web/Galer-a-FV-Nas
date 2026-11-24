@@ -46,6 +46,8 @@
 	<string>LF’AZ Galería se conecta a tu Synology para mostrar tus fotos y videos.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>LF’AZ Galería muestra las fotos y videos de este iPhone junto con los de tu NAS. Solo los lee; no cambia ni borra nada.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>LF’AZ Galería usa Face ID para abrir tus fotos ocultas.</string>
 	<key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>

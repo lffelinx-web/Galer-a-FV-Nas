@@ -69,6 +69,19 @@ final class PhoneLibrary: NSObject, PHPhotoLibraryChangeObserver {
         return options
     }
 
+    /// The ids in one of the iPhone's own smart albums, such as Selfies or Recently Added.
+    func ids(in subtype: PHAssetCollectionSubtype, limit: Int = 0) async -> [String] {
+        await Task.detached(priority: .userInitiated) { () -> [String] in
+            guard let collection = PHAssetCollection.fetchAssetCollections(with: .smartAlbum, subtype: subtype, options: nil).firstObject else { return [] }
+            let options = Self.sortedOptions()
+            options.fetchLimit = limit
+            let result = PHAsset.fetchAssets(in: collection, options: options)
+            var ids: [String] = []
+            result.enumerateObjects { asset, _, _ in ids.append("p:" + asset.localIdentifier) }
+            return ids
+        }.value
+    }
+
     nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) {
         Task { @MainActor in self.onChange?() }
     }
@@ -134,6 +147,7 @@ extension GalleryItem {
         self.init(id: "p:" + asset.localIdentifier, source: .phone(asset.localIdentifier),
                   date: asset.creationDate ?? asset.modificationDate ?? Date(timeIntervalSince1970: 0), kind: kind,
                   aspect: asset.pixelHeight > 0 ? Double(asset.pixelWidth) / Double(asset.pixelHeight) : 1,
-                  duration: asset.mediaType == .video ? asset.duration : nil, name: "", bytes: nil, folder: nil, favorite: asset.isFavorite)
+                  duration: asset.mediaType == .video ? asset.duration : nil, name: "", bytes: nil, folder: nil, favorite: asset.isFavorite,
+                  screenshot: asset.mediaSubtypes.contains(.photoScreenshot))
     }
 }

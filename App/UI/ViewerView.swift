@@ -80,27 +80,51 @@ struct ViewerView: View {
             }
             .buttonStyle(PressStyle())
             .accessibilityLabel("Cerrar")
-            Spacer(minLength: 0)
             if let item = currentItem {
-                VStack(spacing: 1) {
-                    Text(Timeline.format(item.date, "d 'de' MMMM 'de' y")).font(.subheadline.weight(.semibold))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(Timeline.format(item.date, "d 'de' MMMM 'de' y")).font(.subheadline.weight(.semibold)).lineLimit(1).minimumScaleFactor(0.8)
                     Text(detail(item)).font(.caption).foregroundStyle(Palette.secondary).lineLimit(1)
                 }
                 .foregroundStyle(Palette.ink)
-                .padding(.horizontal, 18).frame(height: 46)
+                .padding(.horizontal, 14).frame(height: 46)
                 .liquidCapsule()
+                .layoutPriority(-1)
+                Spacer(minLength: 0)
+                actions(item)
+            } else {
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
-            Button { albumItem = currentItem } label: {
-                Image(systemName: "rectangle.stack.badge.plus").font(.system(size: 17, weight: .semibold)).foregroundStyle(Palette.ink)
-                    .frame(width: 46, height: 46).contentShape(Circle())
-                    .liquidCircle()
-            }
-            .buttonStyle(PressStyle())
-            .accessibilityLabel("Agregar a álbum")
         }
         .padding(.horizontal, 14)
         .padding(.top, 4)
+    }
+
+    /// Favorito, Agregar a álbum and Ocultar, in one glass capsule.
+    private func actions(_ item: GalleryItem) -> some View {
+        let favorite = store.isFavorite(item)
+        let hidden = store.isHidden(item)
+        return HStack(spacing: 0) {
+            Button { store.toggleFavorite(item) } label: {
+                Image(systemName: favorite ? "heart.fill" : "heart").foregroundStyle(favorite ? Color.red : Palette.ink)
+                    .frame(width: 42, height: 46).contentShape(Rectangle())
+            }
+            .accessibilityLabel(favorite ? "Quitar de favoritos" : "Agregar a favoritos")
+            .sensoryFeedback(.impact(weight: .light), trigger: favorite)
+            Button { albumItem = item } label: {
+                Image(systemName: "rectangle.stack.badge.plus").foregroundStyle(Palette.ink)
+                    .frame(width: 42, height: 46).contentShape(Rectangle())
+            }
+            .accessibilityLabel("Agregar a álbum")
+            Button { store.setHidden(item, !hidden) } label: {
+                Image(systemName: hidden ? "eye" : "eye.slash").foregroundStyle(Palette.ink)
+                    .frame(width: 42, height: 46).contentShape(Rectangle())
+            }
+            .accessibilityLabel(hidden ? "Mostrar en Fototeca" : "Ocultar")
+        }
+        .font(.system(size: 17, weight: .semibold))
+        .buttonStyle(PressStyle())
+        .padding(.horizontal, 4)
+        .liquidCapsule()
     }
 
     private func detail(_ item: GalleryItem) -> String {

@@ -141,61 +141,56 @@ struct SettingsView: View {
         }
     }
 
-    /// «● Conectado a DS120j · Red local 192.168.1.70», always at the top.
+    /// The connection at a glance, always at the top: state, NAS and route, last search.
     private var status: some View {
-        HStack(spacing: 14) {
-            Image(systemName: "server.rack").font(.system(size: 20, weight: .semibold)).foregroundStyle(.white)
-                .frame(width: 46, height: 46)
-                .background(Palette.selection, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        HStack(alignment: .center, spacing: 14) {
+            NASBadge(size: 44)
             VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 7) {
-                    Circle().fill(statusColor).frame(width: 9, height: 9)
-                    Text(statusTitle).font(.headline).foregroundStyle(Palette.ink)
+                HStack(spacing: 6) {
+                    Circle().fill(store.nasState.color).frame(width: 8, height: 8)
+                    Text(store.nasState.shortLabel).font(.headline).foregroundStyle(Palette.ink).lineLimit(1)
                 }
-                Text(statusDetail).font(.footnote).foregroundStyle(Palette.secondary).lineLimit(2)
+                Text(statusDetail).font(.subheadline).foregroundStyle(Palette.secondary).lineLimit(1).minimumScaleFactor(0.8)
+                if let extra = statusExtra {
+                    Text(extra).font(.caption).foregroundStyle(Palette.secondary.opacity(0.85)).lineLimit(1)
+                }
             }
-            Spacer(minLength: 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
             if store.account != nil {
                 Button {
                     testing = true
                     Task { await store.checkConnection(); testing = false }
                 } label: {
-                    if testing || store.nasState == .checking { ProgressView() } else { Text("Probar").font(.subheadline.weight(.semibold)) }
+                    Group {
+                        if testing || store.nasState == .checking { ProgressView().controlSize(.small) }
+                        else { Text("Probar").font(.footnote.weight(.semibold)) }
+                    }
+                    .foregroundStyle(Palette.accent)
+                    .frame(minWidth: 64).frame(height: 30)
+                    .background(Palette.accent.opacity(0.12), in: Capsule())
                 }
                 .buttonStyle(.borderless)
                 .disabled(testing)
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
     }
 
-    private var statusColor: Color {
-        switch store.nasState {
-        case .connected: return Palette.online
-        case .checking: return Palette.warning
-        case .offline: return .red
-        case .notConfigured: return .gray
-        }
-    }
-
-    private var statusTitle: String {
-        switch store.nasState {
-        case .connected: return "Conectado a \(store.nasLabel)"
-        case .checking: return "Conectando a \(store.nasLabel)…"
-        case .offline: return "Sin conexión con \(store.nasLabel)"
-        case .notConfigured: return "Sin NAS configurado"
-        }
-    }
-
+    /// «DS120j · Red local 192.168.1.70».
     private var statusDetail: String {
+        guard let account = store.account else { return "Escribe abajo la carpeta de fotos de tu Synology." }
         switch store.nasState {
-        case .connected:
-            let route = store.routeLabel ?? store.account?.root.host ?? ""
-            return store.nasItems.isEmpty ? route : route + " · " + mediaSummary(store.nasItems)
-        case .checking: return store.account?.root.host ?? ""
-        case .offline: return "Revisa que estés en tu red o que Tailscale esté activo, y toca Probar."
-        case .notConfigured: return "Escribe abajo la dirección de la carpeta de fotos de tu Synology."
+        case .offline: return "\(store.nasLabel) · revisa tu red o Tailscale"
+        default: return store.nasLabel + " · " + (store.routeLabel ?? account.root.host ?? "")
         }
+    }
+
+    private var statusExtra: String? {
+        guard store.account != nil else { return nil }
+        var parts: [String] = []
+        if let space = store.spaceText { parts.append(space) }
+        if let date = store.lastScan { parts.append("Revisado " + date.formatted(.relative(presentation: .named))) }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private func fill() {
