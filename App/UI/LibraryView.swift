@@ -287,9 +287,9 @@ struct CollectionWall: UIViewRepresentable {
         view.register(UICollectionViewCell.self, forCellWithReuseIdentifier: "cell")
         view.dataSource = context.coordinator
         view.delegate = context.coordinator
-        let control = UIRefreshControl()
-        control.addTarget(context.coordinator, action: #selector(Coordinator.refreshPulled(_:)), for: .valueChanged)
-        view.refreshControl = control
+        let refresher = UIRefreshControl()
+        refresher.addTarget(context.coordinator, action: #selector(Coordinator.refreshPulled(_:)), for: .valueChanged)
+        view.refreshControl = refresher
         context.coordinator.lastTopRequest = topRequest
         control.collectionView = view
         return container
