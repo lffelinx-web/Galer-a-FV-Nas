@@ -13,8 +13,8 @@ Galería de fotos para iPhone que reúne en un solo lugar las fotos del teléfon
 
 - Fototeca con mosaico y escalas Días, Meses y Años; tocar un año abre sus meses y tocar un mes abre sus días.
 - Visor a pantalla completa: deslizar entre fotos, pellizcar o doble toque para hacer zoom, deslizar hacia abajo para cerrar. Live Photos y videos del iPhone; los videos del NAS se descargan y se reproducen.
-- Pestaña NAS con el estado de la conexión, la ruta usada y el explorador de carpetas.
-- Álbumes del iPhone (Favoritos, Videos, Selfies, Live Photos…) y carpetas del NAS.
+- Pestaña NAS con todas las fotos del NAS juntas, ordenadas por fecha, bajo un encabezado compacto; la carpeta, la ruta y las acciones están en el menú «…».
+- Álbumes propios de la app: pueden mezclar fotos del iPhone y del NAS y viven solo en la app (no cambian la fototeca ni el NAS). Se agregan fotos desde el visor.
 - Miniaturas del NAS: primero se usan las que genera Synology Photos (`@eaDir/…/SYNOPHOTO_THUMB_XL.jpg`); si no están disponibles, se descarga el original una sola vez y se guarda una miniatura en el iPhone.
 - La fecha de las fotos del NAS se toma del nombre (`IMG_20230514_101530.jpg`, `WhatsApp Image 2023-05-14 at 10.15.30.jpeg`…), de carpetas como `2023/05` o `2023/Mayo`, o de la fecha de modificación.
 

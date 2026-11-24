@@ -25,13 +25,6 @@ enum PhotoAccess: Equatable {
     }
 }
 
-struct PhoneAlbum: Identifiable {
-    let id: String
-    let title: String
-    let count: Int
-    let cover: GalleryItem?
-}
-
 /// Reads the iPhone photo library with PhotoKit. Nothing is ever written to it.
 @MainActor
 final class PhoneLibrary: NSObject, PHPhotoLibraryChangeObserver {
@@ -129,40 +122,6 @@ final class PhoneLibrary: NSObject, PHPhotoLibraryChangeObserver {
         return await withCheckedContinuation { continuation in
             manager.requestPlayerItem(forVideo: asset, options: options) { item, _ in continuation.resume(returning: item) }
         }
-    }
-
-    // MARK: Albums
-
-    func albums() async -> [PhoneAlbum] {
-        await Task.detached(priority: .userInitiated) { Self.fetchAlbums() }.value
-    }
-
-    nonisolated static func fetchAlbums() -> [PhoneAlbum] {
-        var collections: [PHAssetCollection] = []
-        let smart: [PHAssetCollectionSubtype] = [.smartAlbumFavorites, .smartAlbumRecentlyAdded, .smartAlbumVideos, .smartAlbumSelfPortraits,
-                                                 .smartAlbumLivePhotos, .smartAlbumPanoramas, .smartAlbumScreenshots, .smartAlbumBursts]
-        for subtype in smart {
-            if let collection = PHAssetCollection.fetchAssetCollections(with: .smartAlbum, subtype: subtype, options: nil).firstObject { collections.append(collection) }
-        }
-        PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: nil).enumerateObjects { collection, _, _ in collections.append(collection) }
-        return collections.compactMap { collection in
-            let result = PHAsset.fetchAssets(in: collection, options: sortedOptions())
-            guard result.count > 0 else { return nil }
-            return PhoneAlbum(id: collection.localIdentifier, title: collection.localizedTitle ?? "Álbum", count: result.count,
-                              cover: result.firstObject.map { GalleryItem(asset: $0) })
-        }
-    }
-
-    func items(inAlbum id: String) async -> [GalleryItem] {
-        let (items, found) = await Task.detached(priority: .userInitiated) { () -> ([GalleryItem], [PHAsset]) in
-            guard let collection = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [id], options: nil).firstObject else { return ([], []) }
-            let result = PHAsset.fetchAssets(in: collection, options: Self.sortedOptions())
-            var items: [GalleryItem] = [], assets: [PHAsset] = []
-            result.enumerateObjects { asset, _, _ in items.append(GalleryItem(asset: asset)); assets.append(asset) }
-            return (items, assets)
-        }.value
-        for asset in found where assets[asset.localIdentifier] == nil { assets[asset.localIdentifier] = asset }
-        return items
     }
 }
 

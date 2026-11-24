@@ -91,3 +91,13 @@ func mediaSummary(_ items: [GalleryItem]) -> String {
     if videos > 0 { parts.append(countText(videos, "video", "videos")) }
     return parts.joined(separator: " · ")
 }
+
+/// An album made in the app. It can mix photos from the iPhone and the NAS; it lives only
+/// in the app, so the iPhone library and the NAS are never changed.
+struct AppAlbum: Codable, Identifiable, Equatable {
+    var id: UUID
+    var name: String
+    var created: Date
+    /// Item ids, most recently added first.
+    var items: [String]
+}

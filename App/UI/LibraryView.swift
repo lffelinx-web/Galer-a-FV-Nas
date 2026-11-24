@@ -57,18 +57,49 @@ private struct OffsetKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
-/// Fototeca: the photo wall of the iPhone and the NAS together.
-struct LibraryView: View {
+/// How far the content is scrolled from the top. iOS 18 and later report it directly;
+/// earlier versions read the position of a marker at the top of the content.
+private struct ScrollDistance: ViewModifier {
+    var action: (CGFloat) -> Void
+    func body(content: Content) -> some View {
+        if #available(iOS 18, *) {
+            content.onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.contentOffset.y + geometry.contentInsets.top
+            } action: { _, distance in
+                action(distance)
+            }
+        } else {
+            content.onPreferenceChange(OffsetKey.self) { action(-$0) }
+        }
+    }
+}
+
+private struct WallKey: Equatable {
+    let revision: Int
+    let scale: TimeScale
+    let width: CGFloat
+}
+
+/// The photo wall shared by Fototeca and NAS: a mosaic by day, a grid by month or a card
+/// per year. The layout of tens of thousands of photos is built off the main thread.
+struct PhotoWall<Header: View, Empty: View>: View {
     @EnvironmentObject var store: GalleryStore
+    var items: [GalleryItem]
+    var revision: Int
     @Binding var scale: TimeScale
-    @Binding var compact: Bool
     var topRequest: Int
-    var openSettings: () -> Void
+    var onScroll: (CGFloat) -> Void
+    var refresh: () async -> Void
+    @ViewBuilder var header: () -> Header
+    @ViewBuilder var empty: () -> Empty
 
     @State private var sections: [TimelineSection] = []
     @State private var rows: [LibraryRow] = []
-    @State private var tracker = FocusTracker()
     @State private var width: CGFloat = 0
+    @State private var tracker = FocusTracker()
+    @State private var pendingJump: Date?
+    @State private var building = true
+    @State private var layoutID = 0
 
     var body: some View {
         GeometryReader { geo in
@@ -76,69 +107,87 @@ struct LibraryView: View {
                 ScrollView {
                     VStack(spacing: 0) {
                         Color.clear.frame(height: 0).id("top")
-                            .background(GeometryReader { g in
-                                Color.clear.preference(key: OffsetKey.self, value: g.frame(in: .named("library")).minY)
+                            .background(GeometryReader { marker in
+                                Color.clear.preference(key: OffsetKey.self, value: marker.frame(in: .named("wall")).minY)
                             })
-                        header
-                        if store.items.isEmpty { empty } else { wall }
+                        header()
+                        if items.isEmpty { empty() }
+                        else if rows.isEmpty && building { ProgressView().padding(.top, 80) }
+                        else { wall }
                     }
                 }
-                .coordinateSpace(name: "library")
+                .coordinateSpace(name: "wall")
                 .scrollIndicators(.hidden)
                 .contentMargins(.bottom, 110, for: .scrollContent)
-                .refreshable { await store.refresh() }
-                .onPreferenceChange(OffsetKey.self) { y in
-                    let next = compact ? y < -30 : y < -90
-                    if next != compact { compact = next }
-                }
+                .modifier(ScrollDistance(action: onScroll))
+                .refreshable { await refresh() }
                 .onChange(of: topRequest) {
                     tracker.requested = nil
                     withAnimation(.smooth(duration: 0.45)) { proxy.scrollTo("top", anchor: .top) }
                 }
-                .onChange(of: scale) { old, new in
-                    let target = compact || tracker.requested != nil ? tracker.focus : nil
+                .onChange(of: scale) {
+                    // Keep the place: jump to the same dates once the new layout is ready.
+                    pendingJump = tracker.focus
                     tracker.requested = nil
                     tracker.visible = [:]
-                    rebuild(width: geo.size.width)
-                    guard let target, let section = Timeline.section(containing: target, in: sections, scale: new) else { return }
-                    DispatchQueue.main.async { proxy.scrollTo(section.id, anchor: .top) }
                 }
-                .onChange(of: store.revision) { rebuild(width: geo.size.width) }
-                .onChange(of: geo.size.width) { _, value in rebuild(width: value) }
-                .onAppear { rebuild(width: geo.size.width) }
+                .task(id: WallKey(revision: revision, scale: scale, width: geo.size.width - LibraryRows.spacing * 2)) {
+                    await build(width: geo.size.width - LibraryRows.spacing * 2, proxy: proxy)
+                }
             }
         }
     }
 
-    private func rebuild(width: CGFloat) {
-        let inner = width - LibraryRows.spacing * 2
-        sections = Timeline.sections(store.items, scale: scale)
-        rows = LibraryRows.build(sections, scale: scale, width: inner)
-        self.width = inner
-    }
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Brand()
-                Spacer(minLength: 8)
-                StatusPill()
-            }
-            if let status = store.scanStatus {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(status).font(.footnote).foregroundStyle(Palette.secondary).lineLimit(1)
-                }
-                .padding(.horizontal, 12).frame(height: 30)
-                .liquidCapsule()
+    private func build(width: CGFloat, proxy: ScrollViewProxy) async {
+        guard width > 0 else { return }
+        building = true
+        let (items, scale) = (self.items, self.scale)
+        let result = await Task.detached(priority: .userInitiated) { () -> ([TimelineSection], [LibraryRow]) in
+            let sections = Timeline.sections(items, scale: scale)
+            return (sections, LibraryRows.build(sections, scale: scale, width: width))
+        }.value
+        guard !Task.isCancelled else { return }
+        sections = result.0
+        rows = result.1
+        self.width = width
+        layoutID += 1
+        building = false
+        if let target = pendingJump {
+            pendingJump = nil
+            if let section = Timeline.section(containing: target, in: sections, scale: scale) {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                proxy.scrollTo(section.id, anchor: .top)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 14)
     }
 
     private var wall: some View {
+        WallRows(rows: rows, layoutID: layoutID, width: width, scale: scale, tracker: tracker,
+                 jump: { date, next in
+                     tracker.requested = date
+                     scale = next
+                 },
+                 open: { [items] item in store.open(item, in: items) })
+            .equatable()
+    }
+}
+
+/// The rows themselves. They only redraw when the layout changes, not on every status
+/// change of the store, which matters with tens of thousands of photos.
+private struct WallRows: View, Equatable {
+    let rows: [LibraryRow]
+    let layoutID: Int
+    let width: CGFloat
+    let scale: TimeScale
+    let tracker: FocusTracker
+    let jump: (Date, TimeScale) -> Void
+    let open: (GalleryItem) -> Void
+
+    static func == (lhs: WallRows, rhs: WallRows) -> Bool {
+        lhs.layoutID == rhs.layoutID && lhs.width == rhs.width && lhs.scale == rhs.scale
+    }
+
+    var body: some View {
         LazyVStack(spacing: LibraryRows.spacing) {
             ForEach(rows) { row in
                 rowView(row)
@@ -155,44 +204,79 @@ struct LibraryView: View {
         case .header(let section):
             SectionHeader(section: section, scale: scale) {
                 guard scale == .months else { return }
-                tracker.requested = section.date
-                scale = .days
+                jump(section.date, .days)
             }
-        case .mosaic(let block, let items):
+        case .mosaic(let block, let tiles):
             ZStack(alignment: .topLeading) {
-                ForEach(0..<min(items.count, block.tiles.count), id: \.self) { index in
-                    tileButton(items[index], size: block.tiles[index].frame.size, corner: 8)
+                ForEach(0..<min(tiles.count, block.tiles.count), id: \.self) { index in
+                    tileButton(tiles[index], size: block.tiles[index].frame.size, corner: 8)
                         .offset(x: block.tiles[index].frame.minX, y: block.tiles[index].frame.minY)
                 }
             }
             .frame(width: width, height: block.height, alignment: .topLeading)
-        case .squares(let items):
+        case .squares(let tiles):
             let side = ((width - LibraryRows.spacing * CGFloat(LibraryRows.columns - 1)) / CGFloat(LibraryRows.columns)).rounded(.down)
             HStack(spacing: LibraryRows.spacing) {
-                ForEach(items) { item in tileButton(item, size: CGSize(width: side, height: side), corner: 6) }
+                ForEach(tiles) { item in tileButton(item, size: CGSize(width: side, height: side), corner: 6) }
                 Spacer(minLength: 0)
             }
             .frame(width: width)
         case .year(let section):
-            YearCard(section: section) {
-                tracker.requested = section.date
-                scale = .months
-            }
-            .padding(.horizontal, 4).padding(.bottom, 10)
+            YearCard(section: section) { jump(section.date, .months) }
+                .padding(.horizontal, 4).padding(.bottom, 10)
         }
     }
 
     private func tileButton(_ item: GalleryItem, size: CGSize, corner: CGFloat) -> some View {
-        Button { store.open(item, in: store.items) } label: {
+        Button { open(item) } label: {
             Thumbnail(item: item, pixelSize: max(size.width, size.height))
                 .frame(width: size.width, height: size.height)
                 .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
         }
         .buttonStyle(PressStyle())
     }
+}
+
+/// Fototeca: the photos of the iPhone and the NAS together.
+struct LibraryView: View {
+    @EnvironmentObject var store: GalleryStore
+    @Binding var scale: TimeScale
+    @Binding var compact: Bool
+    var topRequest: Int
+    var openSettings: () -> Void
+
+    var body: some View {
+        PhotoWall(items: store.items, revision: store.revision, scale: $scale, topRequest: topRequest,
+                  onScroll: updateCompact, refresh: { await store.refresh() }) {
+            header
+        } empty: {
+            empty
+        }
+    }
+
+    /// The bar splits once the photos reach the top, and joins again near the top.
+    private func updateCompact(_ distance: CGFloat) {
+        let next = compact ? distance > 30 : distance > 90
+        guard next != compact else { return }
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) { compact = next }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Brand()
+                Spacer(minLength: 8)
+                StatusPill()
+            }
+            ScanBanner()
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 14)
+    }
 
     @ViewBuilder private var empty: some View {
-        if store.scanning || (store.items.isEmpty && store.photoAccess.canRead && store.phoneItems.isEmpty && store.account != nil && store.nasItems.isEmpty && store.nasState == .checking) {
+        if !store.loaded || store.scanning {
             VStack(spacing: 14) {
                 ProgressView()
                 Text(store.scanStatus ?? "Cargando fotos…").font(.subheadline).foregroundStyle(Palette.secondary)
@@ -210,8 +294,23 @@ struct LibraryView: View {
                        action: ("Configurar NAS", openSettings))
                 .padding(.top, 60)
         } else {
-            EmptyState(symbol: "photo", title: "Sin fotos", message: "No se encontraron fotos ni videos. Desliza hacia abajo para buscar de nuevo.")
+            EmptyState(symbol: "photo", title: "Sin fotos", message: "No se encontraron fotos ni videos. Busca de nuevo desde la pestaña NAS.")
                 .padding(.top, 60)
+        }
+    }
+}
+
+/// «Buscando fotos en el NAS…» while a search runs.
+struct ScanBanner: View {
+    @EnvironmentObject var store: GalleryStore
+    var body: some View {
+        if let status = store.scanStatus {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(status).font(.footnote).foregroundStyle(Palette.secondary).lineLimit(1)
+            }
+            .padding(.horizontal, 12).frame(height: 30)
+            .liquidCapsule()
         }
     }
 }

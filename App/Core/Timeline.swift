@@ -47,26 +47,23 @@ enum Timeline {
         return result
     }
 
-    private static let formatters: [String: DateFormatter] = {
-        var all: [String: DateFormatter] = [:]
-        for format in ["EEEE d 'de' MMMM", "d 'de' MMMM 'de' y", "LLLL y", "y", "HH:mm"] {
-            let formatter = DateFormatter()
-            formatter.locale = Locale(identifier: "es_MX")
-            formatter.dateFormat = format
-            all[format] = formatter
-        }
-        return all
-    }()
+    private static let formatterLock = NSLock()
+    private static var formatters: [String: DateFormatter] = [:]
 
+    /// Thread-safe: the timeline is built off the main thread.
     static func format(_ date: Date, _ pattern: String, calendar: Calendar = .current) -> String {
-        let formatter = formatters[pattern] ?? {
-            let formatter = DateFormatter()
+        let key = pattern + "|" + calendar.timeZone.identifier
+        formatterLock.lock()
+        defer { formatterLock.unlock() }
+        let formatter: DateFormatter
+        if let cached = formatters[key] { formatter = cached } else {
+            formatter = DateFormatter()
             formatter.locale = Locale(identifier: "es_MX")
+            formatter.calendar = calendar
+            formatter.timeZone = calendar.timeZone
             formatter.dateFormat = pattern
-            return formatter
-        }()
-        formatter.calendar = calendar
-        formatter.timeZone = calendar.timeZone
+            formatters[key] = formatter
+        }
         return formatter.string(from: date).capitalizedFirst
     }
 

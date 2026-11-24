@@ -13,6 +13,7 @@ struct ViewerView: View {
     @State private var chrome = true
     @State private var zoomed = false
     @State private var dragY: CGFloat = 0
+    @State private var albumItem: GalleryItem?
     private let positions: [String: Int]
 
     init(context: ViewerContext) {
@@ -54,6 +55,7 @@ struct ViewerView: View {
             if chrome { topBar.transition(.move(edge: .top).combined(with: .opacity)) }
         }
         .statusBarHidden(!chrome)
+        .sheet(item: $albumItem) { AddToAlbumSheet(itemID: $0.id).environmentObject(store) }
         .onChange(of: current) { zoomed = false }
     }
 
@@ -89,7 +91,13 @@ struct ViewerView: View {
                 .liquidCapsule()
             }
             Spacer(minLength: 0)
-            Color.clear.frame(width: 46, height: 46)
+            Button { albumItem = currentItem } label: {
+                Image(systemName: "rectangle.stack.badge.plus").font(.system(size: 17, weight: .semibold)).foregroundStyle(Palette.ink)
+                    .frame(width: 46, height: 46).contentShape(Circle())
+                    .liquidCircle()
+            }
+            .buttonStyle(PressStyle())
+            .accessibilityLabel("Agregar a álbum")
         }
         .padding(.horizontal, 14)
         .padding(.top, 4)

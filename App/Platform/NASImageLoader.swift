@@ -2,17 +2,33 @@ import UIKit
 import ImageIO
 import AVFoundation
 
-/// Limits how many NAS downloads run at once.
+/// Limits how many NAS downloads run at once. The newest request goes first, because it
+/// belongs to the photos now on screen, and a request whose tile scrolled away leaves
+/// the queue instead of downloading.
 actor Gate {
     private var available: Int
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var waiters: [(id: UUID, continuation: CheckedContinuation<Bool, Never>)] = []
     init(_ count: Int) { available = count }
-    func enter() async {
-        if available > 0 { available -= 1; return }
-        await withCheckedContinuation { waiters.append($0) }
+
+    /// False when the task was cancelled while waiting; then `leave` must not be called.
+    func enter() async -> Bool {
+        if Task.isCancelled { return false }
+        if available > 0 { available -= 1; return true }
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in waiters.append((id, continuation)) }
+        } onCancel: {
+            Task { await self.cancel(id) }
+        }
     }
+
+    private func cancel(_ id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        waiters.remove(at: index).continuation.resume(returning: false)
+    }
+
     func leave() {
-        if waiters.isEmpty { available += 1 } else { waiters.removeFirst().resume() }
+        if let next = waiters.popLast() { next.continuation.resume(returning: true) } else { available += 1 }
     }
 }
 
@@ -23,6 +39,7 @@ actor Gate {
 actor NASImageLoader {
     static let shared = NASImageLoader()
     static let thumbnailPixels: CGFloat = 720
+    static let maxThumbnailSource = 40_000_000
 
     private struct Running {
         let token: UUID
@@ -31,10 +48,10 @@ actor NASImageLoader {
     }
 
     private let memory: NSCache<NSString, UIImage> = {
-        let cache = NSCache<NSString, UIImage>(); cache.totalCostLimit = 160 * 1_048_576; return cache
+        let cache = NSCache<NSString, UIImage>(); cache.totalCostLimit = 100 * 1_048_576; return cache
     }()
     private let full: NSCache<NSString, UIImage> = {
-        let cache = NSCache<NSString, UIImage>(); cache.totalCostLimit = 200 * 1_048_576; return cache
+        let cache = NSCache<NSString, UIImage>(); cache.totalCostLimit = 120 * 1_048_576; return cache
     }()
     private var running: [String: Running] = [:]
     private let gate = Gate(3)
@@ -116,7 +133,7 @@ actor NASImageLoader {
     private static func produceThumbnail(_ item: GalleryItem, url: URL, account: NASAccount, gate: Gate, loader: NASImageLoader) async -> UIImage? {
         let file = diskFile(url)
         if FileManager.default.fileExists(atPath: file.path) { return decode(file, maxPixels: thumbnailPixels) }
-        await gate.enter()
+        guard await gate.enter() else { return nil }
         defer { Task { await gate.leave() } }
         guard !Task.isCancelled else { return nil }
         let transport = NASTransport(account)
@@ -133,8 +150,10 @@ actor NASImageLoader {
             if FileManager.default.fileExists(atPath: local.path) { return await videoFrame(local) }
             return nil
         }
-        if data == nil, item.kind != .video {
-            data = try? await transport.request(url, limit: 150_000_000).data
+        // Without a Synology thumbnail the original is needed; very large files (RAW) are
+        // skipped here so a few of them cannot exhaust the memory, and open in the viewer.
+        if data == nil, item.kind != .video, (item.bytes ?? 0) <= Self.maxThumbnailSource {
+            data = try? await transport.request(url, limit: Self.maxThumbnailSource).data
         }
         guard !Task.isCancelled, let data, let image = decode(data, maxPixels: thumbnailPixels) else { return nil }
         if let jpeg = image.jpegData(compressionQuality: 0.82) { try? jpeg.write(to: file, options: .atomic) }
@@ -146,7 +165,7 @@ actor NASImageLoader {
         guard let url = item.nasURL else { throw GalleryError.message("La foto no está en el NAS.") }
         let key = url.absoluteString as NSString
         if let image = full.object(forKey: key) { return image }
-        await gate.enter()
+        guard await gate.enter() else { throw CancellationError() }
         let data: Data
         do { data = try await NASTransport(account).request(url, limit: 200_000_000).data; await gate.leave() }
         catch { await gate.leave(); throw error }

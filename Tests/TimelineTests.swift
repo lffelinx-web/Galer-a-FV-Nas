@@ -104,21 +104,6 @@ final class NASTests: XCTestCase {
         let root = URL(string: "https://nas.example.com:5006/photo/")!
         XCTAssertTrue(URLPolicy.allowed(NASImageLoader.synologyThumbnailURL(url), root: root))
     }
-
-    func testFolderTree() {
-        func make(_ folder: String, _ name: String) -> GalleryItem {
-            GalleryItem(id: folder + name, source: .nas(URL(string: "https://nas.example.com/photo/\(name)")!), date: Date(), kind: .photo,
-                        aspect: 1, duration: nil, name: name, bytes: nil, folder: folder)
-        }
-        let items = [make("", "a.jpg"), make("2023", "b.jpg"), make("2023/Playa", "c.jpg"), make("2024", "d.jpg")]
-        let root = FolderTree.children(of: "", in: items)
-        XCTAssertEqual(root.folders.map(\.name), ["2023", "2024"])
-        XCTAssertEqual(root.folders.first?.count, 2)
-        XCTAssertEqual(root.files.map(\.name), ["a.jpg"])
-        let year = FolderTree.children(of: "2023", in: items)
-        XCTAssertEqual(year.folders.map(\.path), ["2023/Playa"])
-        XCTAssertEqual(year.files.map(\.name), ["b.jpg"])
-    }
 }
 
 final class WebDAVTests: XCTestCase {

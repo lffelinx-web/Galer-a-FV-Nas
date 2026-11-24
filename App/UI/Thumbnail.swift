@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// A photo or video tile from either source. Fills its frame and crops.
+/// A photo or video tile from either source. Fills its frame and crops. It does not
+/// observe the store, so thousands of tiles are not redrawn on every status change.
 struct Thumbnail: View {
-    @EnvironmentObject var store: GalleryStore
     @Environment(\.displayScale) private var displayScale
     let item: GalleryItem
     /// The longer side of the tile, in points.
@@ -33,6 +33,8 @@ struct Thumbnail: View {
             }
             .clipped()
             .task(id: item.id) { await load() }
+            // Tiles that scrolled away give their image back; the caches bring it back fast.
+            .onDisappear { image = nil; shown = nil }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(accessibilityText)
             .accessibilityAddTraits(.isImage)
@@ -46,7 +48,7 @@ struct Thumbnail: View {
 
     private func load() async {
         if shown != item.id { image = nil; shown = item.id }
-        let pixels = min(pixelSize * displayScale, 1400)
+        let pixels = min(pixelSize * displayScale, 800)
         switch item.source {
         case .phone(let id):
             for await next in PhoneLibrary.shared.images(id, pixels: CGSize(width: pixels, height: pixels), fill: true) {
@@ -54,7 +56,7 @@ struct Thumbnail: View {
             }
         case .nas(let url):
             if let cached = NASImageLoader.shared.cached(url) { image = cached; return }
-            guard let account = store.account else { return }
+            guard let account = ActiveAccount.current else { return }
             let loaded = await NASImageLoader.shared.thumbnail(item, account: account)
             guard !Task.isCancelled, let loaded else { return }
             withAnimation(.easeOut(duration: 0.2)) { image = loaded }

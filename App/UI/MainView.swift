@@ -54,6 +54,8 @@ struct MainView: View {
                 bar
                     .padding(.horizontal, 14)
                     .padding(.bottom, geo.safeAreaInsets.bottom > 0 ? 0 : 12)
+                    // A little closer to the edge than the safe area, without touching it.
+                    .offset(y: geo.safeAreaInsets.bottom > 0 ? 8 : 0)
             }
         }
         .fullScreenCover(item: $store.viewer) { ViewerView(context: $0).environmentObject(store) }
