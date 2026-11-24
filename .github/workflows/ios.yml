@@ -25,33 +25,36 @@ jobs:
         run: brew install xcodegen
       - name: Generar proyecto
         run: xcodegen generate
-      - name: Arrancar simulador
-        id: simulador
+      - name: Compilar para pruebas
         shell: bash
         run: |
-          DEVICE=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for group in d["devices"].values() for v in group if v["name"].startswith("iPhone")))')
-          echo "device=$DEVICE" >> "$GITHUB_OUTPUT"
-          xcrun simctl boot "$DEVICE" || true
-          # Waits until the simulator is ready, so the tests do not hang on a half-started one.
-          xcrun simctl bootstatus "$DEVICE" -b
+          set -o pipefail
+          xcodebuild -project LFAZGaleria.xcodeproj -scheme LFAZGaleria -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build-tests CODE_SIGNING_ALLOWED=NO build-for-testing
       - name: Probar en simulador
         shell: bash
-        timeout-minutes: 25
+        timeout-minutes: 30
         run: |
-          DEVICE=${{ steps.simulador.outputs.device }}
-          run_tests() {
-            rm -rf TestResults.xcresult
-            perl -e 'alarm shift; exec @ARGV' 900 xcodebuild -project LFAZGaleria.xcodeproj -scheme LFAZGaleria -destination "platform=iOS Simulator,id=$DEVICE" \
-              -derivedDataPath build-tests -resultBundlePath TestResults.xcresult CODE_SIGNING_ALLOWED=NO test
-          }
-          # The GitHub simulator sometimes stops answering; one retry after a restart.
-          if ! run_tests; then
-            echo "::warning::El simulador no respondió; se reinicia y se vuelve a probar."
-            xcrun simctl shutdown "$DEVICE" || true
+          # A fresh simulator for each attempt: the preinstalled ones sometimes hang while booting.
+          # Same model and iOS as an iPhone simulator that is already installed.
+          read -r TYPE RUNTIME < <(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(v["deviceTypeIdentifier"] + " " + r for r, group in d.items() if "iOS" in r for v in group if v["name"].startswith("iPhone")))')
+          attempt() {
+            DEVICE=$(xcrun simctl create "Pruebas-$1" "$TYPE" "$RUNTIME")
             xcrun simctl boot "$DEVICE" || true
-            xcrun simctl bootstatus "$DEVICE" -b
-            run_tests
-          fi
+            if ! perl -e 'alarm shift; exec @ARGV' 300 xcrun simctl bootstatus "$DEVICE" -b; then
+              echo "::warning::El simulador no arrancó a tiempo (intento $1)."
+              xcrun simctl delete "$DEVICE" || true
+              return 1
+            fi
+            rm -rf TestResults.xcresult
+            perl -e 'alarm shift; exec @ARGV' 600 xcodebuild -project LFAZGaleria.xcodeproj -scheme LFAZGaleria -destination "platform=iOS Simulator,id=$DEVICE" \
+              -derivedDataPath build-tests -resultBundlePath TestResults.xcresult CODE_SIGNING_ALLOWED=NO test-without-building
+            local status=$?
+            xcrun simctl shutdown "$DEVICE" || true
+            xcrun simctl delete "$DEVICE" || true
+            return $status
+          }
+          attempt 1 || attempt 2
       - name: Compilar IPA sin firmar
         shell: bash
         run: |
