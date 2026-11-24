@@ -49,7 +49,12 @@ struct SettingsView: View {
                 Section {
                     Toggle("Fotos del iPhone", isOn: $store.showPhone)
                     Toggle("Fotos del NAS", isOn: $store.showNAS)
-                } header: { Text("Mostrar en la Fototeca") }
+                    Toggle("Ocultar duplicados", isOn: $store.hideDuplicates)
+                } header: { Text("Mostrar en la Fototeca") } footer: {
+                    Text(store.hideDuplicates && store.duplicatesHidden > 0
+                         ? "\(store.duplicatesHidden.formatted()) fotos del NAS ya están en este iPhone (por ejemplo, un respaldo) y se muestran una sola vez. En la pestaña NAS siguen apareciendo todas."
+                         : "Las fotos del NAS que también están en este iPhone se muestran una sola vez. Se detectan por la fecha de captura, que se lee en segundo plano.")
+                }
 
                 Section {
                     LabeledContent("Permiso", value: store.photoAccess.label)

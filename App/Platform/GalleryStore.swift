@@ -61,6 +61,11 @@ final class GalleryStore: ObservableObject {
     @Published var showNAS = UserDefaults.standard.object(forKey: "showNAS") as? Bool ?? true {
         didSet { UserDefaults.standard.set(showNAS, forKey: "showNAS"); merge() }
     }
+    /// Hides NAS copies of photos that are also on the iPhone, such as an iPhone backup.
+    @Published var hideDuplicates = UserDefaults.standard.object(forKey: "hideDuplicates") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(hideDuplicates, forKey: "hideDuplicates"); merge() }
+    }
+    @Published private(set) var duplicatesHidden = 0
 
     /// Every known item by id, whatever the Fototeca filters, for albums.
     private(set) var itemIndex: [String: GalleryItem] = [:]
@@ -344,11 +349,19 @@ final class GalleryStore: ObservableObject {
 
     private func merge() {
         let phone = phoneItems, nas = nasItems
-        let (usePhone, useNAS) = (showPhone, showNAS)
+        let (usePhone, useNAS, dedupe) = (showPhone, showNAS, hideDuplicates)
+        let checked = Set(captured.compactMap { $0.value.date == nil ? nil : $0.key })
         mergeTask?.cancel()
         mergeTask = Task {
-            let (merged, index) = await Task.detached(priority: .userInitiated) { () -> ([GalleryItem], [String: GalleryItem]) in
-                let a = usePhone ? phone : [], b = useNAS ? nas : []
+            let (merged, index, hidden) = await Task.detached(priority: .userInitiated) { () -> ([GalleryItem], [String: GalleryItem], Int) in
+                let a = usePhone ? phone : []
+                var b = useNAS ? nas : []
+                var hidden = 0
+                if dedupe && !a.isEmpty && !b.isEmpty {
+                    let unique = Self.removingDuplicates(b, of: a, checked: checked)
+                    hidden = b.count - unique.count
+                    b = unique
+                }
                 let merged: [GalleryItem]
                 if a.isEmpty { merged = b } else if b.isEmpty { merged = a } else {
                     merged = (a + b).sorted { $0.date == $1.date ? $0.id < $1.id : $0.date > $1.date }
@@ -357,12 +370,34 @@ final class GalleryStore: ObservableObject {
                 index.reserveCapacity(phone.count + nas.count)
                 for item in phone { index[item.id] = item }
                 for item in nas { index[item.id] = item }
-                return (merged, index)
+                return (merged, index, hidden)
             }.value
             guard !Task.isCancelled else { return }
+            duplicatesHidden = hidden
             items = merged
             itemIndex = index
             revision += 1
+        }
+    }
+
+    /// NAS files whose capture second, kind and shape match a photo on the iPhone. Only
+    /// files whose date was read from the file itself (`checked`) are compared, since a
+    /// date guessed from a name or folder is not precise enough.
+    nonisolated static func removingDuplicates(_ nas: [GalleryItem], of phone: [GalleryItem], checked: Set<String>) -> [GalleryItem] {
+        func key(_ item: GalleryItem, second: Int) -> String { (item.kind == .video ? "v" : "p") + String(second) }
+        var shapes: [String: [Double]] = [:]
+        for item in phone {
+            shapes[key(item, second: Int(item.date.timeIntervalSince1970.rounded(.down))), default: []].append(item.aspect)
+        }
+        return nas.filter { item in
+            guard checked.contains(item.id) else { return true }
+            let second = Int(item.date.timeIntervalSince1970.rounded(.down))
+            for offset in -1...1 {
+                guard let candidates = shapes[key(item, second: second + offset)] else { continue }
+                // Same second and same shape (within 3 %), or a shape that is not known yet.
+                if item.aspect == 1 || candidates.contains(where: { abs($0 - item.aspect) / max($0, item.aspect) < 0.03 || $0 == 1 }) { return false }
+            }
+            return true
         }
     }
 

@@ -202,3 +202,22 @@ final class CaptureReaderTests: XCTestCase {
         XCTAssertEqual(info?.aspect ?? 0, 1080.0 / 1920.0, accuracy: 0.001)
     }
 }
+
+final class DuplicateTests: XCTestCase {
+    private func item(_ id: String, _ seconds: Double, kind: MediaKind = .photo, aspect: Double = 0.75, nas: Bool) -> GalleryItem {
+        GalleryItem(id: id, source: nas ? .nas(URL(string: "https://nas.example.com/photo/\(id)")!) : .phone(id),
+                    date: Date(timeIntervalSince1970: seconds), kind: kind, aspect: aspect, duration: nil, name: id, bytes: nil, folder: "")
+    }
+
+    func testHidesNASCopiesOfIPhonePhotos() {
+        let phone = [item("p1", 1_700_000_000.42, nas: false), item("p2", 1_700_000_500, kind: .video, aspect: 0.5625, nas: false)]
+        let nas = [
+            item("copy", 1_700_000_000, nas: true),                                // same second and shape
+            item("video", 1_700_000_501, kind: .video, aspect: 0.5625, nas: true), // a second apart
+            item("other", 1_700_000_000, aspect: 1.5, nas: true),                  // another camera, same second
+            item("unread", 1_700_000_000, nas: true)                               // date not read from the file
+        ]
+        let kept = GalleryStore.removingDuplicates(nas, of: phone, checked: ["copy", "video", "other"])
+        XCTAssertEqual(kept.map(\.id), ["other", "unread"])
+    }
+}
