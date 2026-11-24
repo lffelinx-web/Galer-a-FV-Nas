@@ -78,6 +78,8 @@ struct NASIndex: Codable {
     var scanned: Date?
     /// Ids that were new in that search.
     var added: [String]?
+    /// Each folder as it was, so the next search can skip the unchanged ones.
+    var folders: [String: CachedFolder]?
 }
 
 enum GalleryError: LocalizedError {

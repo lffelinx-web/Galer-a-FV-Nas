@@ -14,11 +14,19 @@ struct ViewerView: View {
     @State private var zoomed = false
     @State private var dragY: CGFloat = 0
     @State private var albumItem: GalleryItem?
+    /// 0: the photo sits on its tile; 1: it fills the screen. Animated when opening and closing.
+    @State private var progress: CGFloat
+    @State private var settled: Bool
     private let positions: [String: Int]
+
+    private var hasSource: Bool { context.sourceFrame != nil && context.sourceImage != nil }
 
     init(context: ViewerContext) {
         self.context = context
         _current = State(initialValue: context.start)
+        let zooms = context.sourceFrame != nil && context.sourceImage != nil
+        _progress = State(initialValue: zooms ? 0 : 1)
+        _settled = State(initialValue: !zooms)
         var positions: [String: Int] = [:]
         positions.reserveCapacity(context.items.count)
         for (index, item) in context.items.enumerated() { positions[item.id] = index }
@@ -29,7 +37,7 @@ struct ViewerView: View {
 
     var body: some View {
         ZStack {
-            Color.black.opacity(1 - min(dragY / 500, 0.7)).ignoresSafeArea()
+            Color.black.opacity((1 - min(dragY / 500, 0.7)) * progress).ignoresSafeArea()
             ScrollView(.horizontal) {
                 LazyHStack(spacing: 0) {
                     ForEach(context.items) { item in
@@ -50,13 +58,67 @@ struct ViewerView: View {
             .offset(y: dragY)
             .scaleEffect(1 - min(dragY / 2500, 0.15))
             .simultaneousGesture(closeGesture, including: zoomed ? .none : .all)
+            .opacity(settled ? 1 : 0)
+            if !settled { zoomLayer }
         }
         .overlay(alignment: .top) {
-            if chrome { topBar.transition(.move(edge: .top).combined(with: .opacity)) }
+            if chrome && settled { topBar.transition(.move(edge: .top).combined(with: .opacity)) }
+        }
+        .presentationBackground(.clear)
+        .onAppear {
+            guard !settled else { return }
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) { progress = 1 } completion: { settled = true }
         }
         .statusBarHidden(!chrome)
         .sheet(item: $albumItem) { AddToAlbumSheet(itemID: $0.id).environmentObject(store) }
         .onChange(of: current) { zoomed = false }
+    }
+
+    /// The tile's picture moving between its place in the wall and the full screen.
+    private var zoomLayer: some View {
+        GeometryReader { geo in
+            if let image = context.sourceImage, let source = context.sourceFrame {
+                let target = fitted(aspect: aspect(of: image), in: CGRect(origin: .zero, size: geo.size))
+                let frame = CGRect(x: source.minX + (target.minX - source.minX) * progress,
+                                   y: source.minY + (target.minY - source.minY) * progress + dragY,
+                                   width: source.width + (target.width - source.width) * progress,
+                                   height: source.height + (target.height - source.height) * progress)
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: max(frame.width, 1), height: max(frame.height, 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8 * (1 - progress), style: .continuous))
+                    .position(x: frame.midX, y: frame.midY)
+            }
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+    }
+
+    private func aspect(of image: UIImage) -> CGFloat {
+        if let item = context.items.first(where: { $0.id == context.start }), item.aspect != 1, item.aspect > 0 { return CGFloat(item.aspect) }
+        return image.size.height > 0 ? image.size.width / image.size.height : 1
+    }
+
+    private func fitted(aspect: CGFloat, in bounds: CGRect) -> CGRect {
+        guard aspect > 0, bounds.height > 0 else { return bounds }
+        if aspect > bounds.width / bounds.height {
+            let height = bounds.width / aspect
+            return CGRect(x: 0, y: (bounds.height - height) / 2, width: bounds.width, height: height)
+        }
+        let width = bounds.height * aspect
+        return CGRect(x: (bounds.width - width) / 2, y: 0, width: width, height: bounds.height)
+    }
+
+    /// Back to the tile when the photo shown is the one that was tapped; otherwise a plain close.
+    private func close() {
+        guard hasSource, current == context.start, !zoomed else { dismiss(); return }
+        settled = false
+        withAnimation(.spring(response: 0.36, dampingFraction: 0.9)) { progress = 0; dragY = 0 } completion: {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { dismiss() }
+        }
     }
 
     private var closeGesture: some Gesture {
@@ -66,14 +128,14 @@ struct ViewerView: View {
                 dragY = value.translation.height
             }
             .onEnded { value in
-                if dragY > 130 || value.predictedEndTranslation.height > 400 && dragY > 40 { dismiss() }
+                if dragY > 130 || value.predictedEndTranslation.height > 400 && dragY > 40 { close() }
                 else { withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { dragY = 0 } }
             }
     }
 
     private var topBar: some View {
         HStack(alignment: .center, spacing: 12) {
-            Button { dismiss() } label: {
+            Button { close() } label: {
                 Image(systemName: "xmark").font(.system(size: 17, weight: .semibold)).foregroundStyle(Palette.ink)
                     .frame(width: 46, height: 46).contentShape(Circle())
                     .liquidCircle()
@@ -315,22 +377,27 @@ struct LivePhotoView: UIViewRepresentable {
 
 // MARK: Videos
 
+/// A video: iPhone videos through PhotoKit; NAS videos streamed from the NAS while they
+/// play (MOV and MP4 in the system player, MKV, AVI and the rest in VLC).
 struct VideoPage: View {
     @EnvironmentObject var store: GalleryStore
     let item: GalleryItem
     let active: Bool
     var toggleChrome: () -> Void
     @State private var player: AVPlayer?
-    @State private var progress: Double?
+    @State private var vlcURL: URL?
     @State private var failure: String?
-    @State private var download: Task<Void, Never>?
+    @State private var started = false
 
-    private var playable: Bool { !item.isNAS || MediaFormat.playable.contains(item.fileExtension) }
+    /// Formats the system player opens; the rest go to VLC.
+    private var native: Bool { !item.isNAS || MediaFormat.playable.contains(item.fileExtension) }
 
     var body: some View {
         ZStack {
             if let player {
                 VideoPlayer(player: player)
+            } else if let vlcURL {
+                VLCInlinePlayer(url: vlcURL, active: active)
             } else {
                 Thumbnail(item: item, pixelSize: 700)
                     .aspectRatio(item.aspect > 0 ? item.aspect : 16 / 9, contentMode: .fit)
@@ -340,96 +407,74 @@ struct VideoPage: View {
             }
         }
         .onChange(of: active) { _, isActive in
-            if isActive { Task { await prepare() } } else { stop() }
+            if isActive { if player != nil { player?.play() } else if !item.isNAS { Task { await prepare() } } } else { pause() }
         }
-        .task { if active { await prepare() } }
+        .task { if active && !item.isNAS { await prepare() } }
         .onDisappear { stop() }
     }
 
     @ViewBuilder private var overlay: some View {
         if let failure {
-            message(failure, symbol: "exclamationmark.triangle")
-        } else if !playable {
-            message("Los videos \(item.fileExtension.uppercased()) se podrán reproducir en una próxima versión.", symbol: "film")
-        } else if let progress {
-            VStack(spacing: 12) {
-                ZStack {
-                    Circle().stroke(.white.opacity(0.25), lineWidth: 5)
-                    Circle().trim(from: 0, to: progress).stroke(.white, style: StrokeStyle(lineWidth: 5, lineCap: .round)).rotationEffect(.degrees(-90))
-                    Text("\(Int(progress * 100))%").font(.caption.weight(.bold)).foregroundStyle(.white).monospacedDigit()
-                }
-                .frame(width: 64, height: 64)
-                Text("Descargando del NAS…").font(.subheadline).foregroundStyle(.white)
-                Button("Cancelar") { download?.cancel(); download = nil; self.progress = nil }
-                    .font(.subheadline.weight(.semibold)).foregroundStyle(.white.opacity(0.85))
+            VStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle").font(.title)
+                Text(failure).font(.subheadline).multilineTextAlignment(.center)
             }
+            .foregroundStyle(.white)
             .padding(24)
             .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .padding(30)
         } else if item.isNAS {
-            Button { startDownload() } label: {
-                Image(systemName: "play.fill").font(.system(size: 30)).foregroundStyle(Palette.accent)
-                    .frame(width: 84, height: 84).contentShape(Circle())
-                    .liquidCircle()
+            Button { Task { await startNAS() } } label: {
+                Group {
+                    if started { ProgressView().tint(Palette.accent) }
+                    else { Image(systemName: "play.fill").font(.system(size: 30)).foregroundStyle(Palette.accent) }
+                }
+                .frame(width: 84, height: 84).contentShape(Circle())
+                .liquidCircle()
             }
             .buttonStyle(PressStyle())
+            .disabled(started)
             .accessibilityLabel("Reproducir")
         } else {
             ProgressView().tint(.white)
         }
     }
 
-    private func message(_ text: String, symbol: String) -> some View {
-        VStack(spacing: 10) {
-            Image(systemName: symbol).font(.title)
-            Text(text).font(.subheadline).multilineTextAlignment(.center)
-        }
-        .foregroundStyle(.white)
-        .padding(24)
-        .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .padding(30)
-    }
-
     private func prepare() async {
-        guard player == nil else { return }
-        switch item.source {
-        case .phone(let id):
-            guard let playerItem = await PhoneLibrary.shared.playerItem(id) else { failure = "No se pudo abrir el video."; return }
-            guard active else { return }
-            let player = AVPlayer(playerItem: playerItem)
-            self.player = player
-            player.play()
-        case .nas(let url):
-            let file = NASImageLoader.videoFile(url)
-            if playable && FileManager.default.fileExists(atPath: file.path) { play(file) }
-        }
-    }
-
-    private func startDownload() {
-        guard let url = item.nasURL, let account = store.account else { failure = "Conecta el NAS para ver este video."; return }
-        let file = NASImageLoader.videoFile(url)
-        progress = 0
-        download = Task {
-            do {
-                try await NASTransport(account).download(url, to: file) { value in
-                    Task { @MainActor in if self.progress != nil { self.progress = value } }
-                }
-                progress = nil
-                if active && !Task.isCancelled { play(file) }
-            } catch {
-                progress = nil
-                if !Task.isCancelled && !(error is CancellationError) { failure = error.localizedDescription }
-            }
-        }
-    }
-
-    private func play(_ file: URL) {
-        let player = AVPlayer(url: file)
+        guard player == nil, case .phone(let id) = item.source else { return }
+        guard let playerItem = await PhoneLibrary.shared.playerItem(id) else { failure = "No se pudo abrir el video."; return }
+        guard active else { return }
+        let player = AVPlayer(playerItem: playerItem)
         self.player = player
         player.play()
     }
 
+    /// Starts at once: the local stream server fetches the parts from the NAS as they play.
+    private func startNAS() async {
+        guard let url = item.nasURL, let account = store.account else { failure = "Conecta el NAS para ver este video."; return }
+        started = true
+        defer { started = false }
+        let file = StreamFile(url: url, bytes: item.bytes)
+        if let local = BlockCache.downloaded(file) { play(local); return }
+        do {
+            let stream = try await StreamServer.shared.url(for: file, account: account)
+            if native { play(stream) } else { vlcURL = stream }
+        } catch {
+            failure = error.localizedDescription
+        }
+    }
+
+    private func play(_ url: URL) {
+        let player = AVPlayer(url: url)
+        self.player = player
+        player.play()
+    }
+
+    private func pause() { player?.pause() }
+
     private func stop() {
         player?.pause()
         player = nil
+        vlcURL = nil
     }
 }

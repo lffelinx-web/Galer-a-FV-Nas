@@ -217,7 +217,7 @@ actor NASImageLoader {
     // MARK: Cache
 
     static func cacheSize() -> Int64 {
-        [folder, videoFolder].reduce(0) { total, url in
+        [folder, videoFolder, BlockCache.cacheFolder].reduce(0) { total, url in
             let files = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.fileSizeKey])) ?? []
             return total + files.reduce(0) { $0 + Int64((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
         }
@@ -225,7 +225,7 @@ actor NASImageLoader {
 
     func clear() {
         memory.removeAllObjects(); full.removeAllObjects()
-        for url in [Self.folder, Self.videoFolder] {
+        for url in [Self.folder, Self.videoFolder, BlockCache.cacheFolder] {
             try? FileManager.default.removeItem(at: url)
             try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         }

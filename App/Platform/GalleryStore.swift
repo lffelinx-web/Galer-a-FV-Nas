@@ -50,6 +50,9 @@ struct ViewerContext: Identifiable {
     let id = UUID()
     let items: [GalleryItem]
     let start: String
+    /// The tapped tile on screen and what it showed, for the zoom in and out.
+    var sourceFrame: CGRect?
+    var sourceImage: UIImage?
 }
 
 /// The app state: the iPhone library, the NAS index, the merged timeline and the app's
@@ -115,6 +118,7 @@ final class GalleryStore: ObservableObject {
     private var datesTask: Task<Void, Never>?
     private var lastStatusUpdate = Date.distantPast
     private var lastSpaceCheck = Date.distantPast
+    private var folderCache: [String: CachedFolder] = [:]
 
     private var indexName: String { "nas-" + String(Files.key(account?.scope ?? "none").prefix(16)) + ".json" }
     private var aspectsName: String { "aspects-" + String(Files.key(account?.scope ?? "none").prefix(16)) + ".json" }
@@ -175,7 +179,13 @@ final class GalleryStore: ObservableObject {
         loaded = true
         guard account != nil else { return }
         await checkConnection()
-        if nasItems.isEmpty && nasState == .connected { scan() } else if nasState == .connected { readCaptureDates() }
+        if nasItems.isEmpty && nasState == .connected { scan() } else if nasState == .connected { searchIfStale() }
+    }
+
+    /// A quick search for new photos when the last one is more than six hours old; it only
+    /// lists the folders that changed. Otherwise the capture dates continue.
+    private func searchIfStale() {
+        if let lastScan, Date().timeIntervalSince(lastScan) < 6 * 3600 { readCaptureDates() } else { scan(quiet: true) }
     }
 
     /// Pull to refresh: the iPhone library and the NAS connection. A full NAS search is
@@ -189,7 +199,7 @@ final class GalleryStore: ObservableObject {
     func resume() async {
         guard loaded else { return }
         await checkConnection()
-        if nasState == .connected { readCaptureDates() }
+        if nasState == .connected { searchIfStale() }
     }
 
     /// Going to the background: keep what was read so far.
@@ -279,19 +289,24 @@ final class GalleryStore: ObservableObject {
         }
     }
 
-    func scan() {
+    /// Searches the NAS. `quiet` is the automatic search: no alert if it fails.
+    func scan(quiet: Bool = false) {
         guard let account, !scanning else { return }
         datesTask?.cancel(); datesTask = nil; datesStatus = nil
-        scanning = true; scanStatus = "Buscando fotos en el NAS…"
+        scanning = true; scanStatus = "Buscando fotos nuevas en el NAS…"
         let aspects = learnedAspects
         let known = captured
         let name = indexName
+        let previousFolders = folderCache
+        let previousItems = Dictionary(nasItems.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         scanTask = Task {
             defer { scanning = false }
             do {
-                let scanned = try await NASScanner(account: account, learnedAspects: aspects).scan { folder, count in
+                let result = try await NASScanner(account: account, learnedAspects: aspects, previousFolders: previousFolders, previousItems: previousItems).scan { folder, count in
                     Task { @MainActor [weak self] in self?.showProgress(folder: folder, count: count) }
                 }
+                let scanned = result.items
+                let folders = result.folders
                 let found = await Task.detached(priority: .userInitiated) { Self.applying(known, to: scanned) }.value
                 guard self.account?.scope == account.scope else { return }
                 let scannedAt = Date()
@@ -301,7 +316,8 @@ final class GalleryStore: ObservableObject {
                 lastAdded = added
                 nasItems = found; lastScan = scannedAt; nasState = .connected; scanStatus = nil
                 let addedIDs = lastAdded
-                Task.detached(priority: .utility) { try? Files.save(NASIndex(items: scanned, scanned: scannedAt, added: addedIDs), name: name) }
+                folderCache = folders
+                Task.detached(priority: .utility) { try? Files.save(NASIndex(items: scanned, scanned: scannedAt, added: addedIDs, folders: folders), name: name) }
                 merge()
                 scanning = false
                 readCaptureDates()
@@ -310,7 +326,7 @@ final class GalleryStore: ObservableObject {
                 guard !Task.isCancelled, !(error is CancellationError) else { return }
                 // Only a network failure means the NAS is offline; a bad listing is reported as an error.
                 if self.account?.scope == account.scope, !(error is GalleryError) { nasState = .offline }
-                self.error = error.localizedDescription
+                if !quiet { self.error = error.localizedDescription }
             }
         }
     }
@@ -354,6 +370,7 @@ final class GalleryStore: ObservableObject {
         nasItems = index.items
         lastScan = index.scanned
         lastAdded = index.added ?? []
+        folderCache = index.folders ?? [:]
         merge()
     }
 
@@ -520,10 +537,14 @@ final class GalleryStore: ObservableObject {
 
     /// Opens the viewer on the photos around the tapped one, so it opens instantly even in
     /// a library of tens of thousands.
-    func open(_ item: GalleryItem, in list: [GalleryItem]) {
+    func open(_ item: GalleryItem, in list: [GalleryItem], from frame: CGRect? = nil, image: UIImage? = nil) {
         let position = list.firstIndex { $0.id == item.id } ?? 0
         let window = list.isEmpty ? [item] : Array(list[max(0, position - 400)..<min(list.count, position + 400)])
-        viewer = ViewerContext(items: window, start: item.id)
+        let context = ViewerContext(items: window, start: item.id, sourceFrame: frame, sourceImage: image)
+        // With a source tile the viewer draws its own zoom, so the system slide is turned off.
+        var transaction = Transaction()
+        transaction.disablesAnimations = frame != nil && image != nil
+        withTransaction(transaction) { viewer = context }
     }
 
     // MARK: Favorites and hidden

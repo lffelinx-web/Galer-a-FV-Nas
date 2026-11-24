@@ -12,7 +12,7 @@ Galería de fotos para iPhone que reúne en un solo lugar las fotos del teléfon
 ## Fase 1 (0.1.0): lectura
 
 - Fototeca con mosaico y escalas Días, Meses y Años; tocar un año abre sus meses y tocar un mes abre sus días.
-- Visor a pantalla completa: deslizar entre fotos, pellizcar o doble toque para hacer zoom, deslizar hacia abajo para cerrar. Live Photos y videos del iPhone; los videos del NAS se descargan y se reproducen.
+- Visor a pantalla completa: deslizar entre fotos, pellizcar o doble toque para hacer zoom, deslizar hacia abajo para cerrar. Live Photos y videos; los del NAS se reproducen por partes mientras se ven (MOV y MP4 en el reproductor del sistema; MKV, AVI y otros con VLC).
 - Pestaña NAS con todas las fotos del NAS juntas, ordenadas por fecha, bajo un encabezado compacto; la carpeta, la ruta y las acciones están en el menú «…».
 - Espacio: resumen de la biblioteca (totales, espacio del NAS, fotos por año, avance de fechas y duplicados), álbumes propios que mezclan iPhone y NAS, tipos automáticos (Favoritos, Videos, Live Photos, Capturas, RAW, Selfies), utilidades (Duplicados, Agregadas recientemente, Sin fecha) y un álbum Oculto protegido con Face ID. Nada de esto cambia la fototeca del iPhone ni el NAS.
 - Fecha de captura: se lee del propio archivo (EXIF o metadatos del video) en segundo plano, se guarda conforme avanza y se reanuda al volver a la app. Las copias del NAS de fotos que ya están en el iPhone se muestran una sola vez en Fototeca.
@@ -27,3 +27,7 @@ En **Configuración** escribe la dirección WebDAV de la carpeta compartida de l
 ## Compilación
 
 El proyecto se genera con XcodeGen y se compila en GitHub Actions sobre macOS, sin necesidad de una Mac propia. Cada push compila, corre las pruebas e incluye un IPA sin firmar. En `main`, si están los secrets `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8` y `APPLE_TEAM_ID`, la app se firma con fastlane match (rama `certificados`) y se sube a TestFlight. Antes de la primera subida hay que crear la app con el identificador `com.lfaz.galeria.ios` en App Store Connect.
+
+## Búsqueda en el NAS
+
+La primera búsqueda recorre todas las carpetas. Las siguientes reutilizan las carpetas sin subcarpetas cuya fecha no cambió, así que solo se vuelven a leer las que tienen algo nuevo. Al abrir la app se busca sola si la última búsqueda tiene más de 6 horas.

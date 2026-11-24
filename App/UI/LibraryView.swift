@@ -48,6 +48,7 @@ struct PhotoWall<Header: View, Empty: View>: View {
     // Held without observing: only the header follows the scroll.
     @State private var scroll = WallScroll()
     @State private var tracker = WallTracker()
+    @State private var control = WallControl()
 
     var body: some View {
         GeometryReader { geo in
@@ -60,7 +61,7 @@ struct PhotoWall<Header: View, Empty: View>: View {
             } else {
                 ZStack(alignment: .top) {
                     CollectionWall(layout: shown, layoutID: layoutID, animated: animateChange, topInset: headerHeight, topRequest: topRequest,
-                                   tracker: tracker,
+                                   tracker: tracker, control: control,
                                    onScroll: { distance, user in
                                        scroll.distance = distance
                                        onScroll(distance, user)
@@ -70,6 +71,10 @@ struct PhotoWall<Header: View, Empty: View>: View {
                         .ignoresSafeArea()
                     WallHeader(scroll: scroll) { header() }
                         .background(GeometryReader { proxy in Color.clear.preference(key: HeaderHeightKey.self, value: proxy.size.height) })
+                    DateScrubber(scroll: scroll, control: control, label: { distance in
+                        shown.date(at: distance + 20).map { Timeline.format($0, "LLLL y") }
+                    })
+                    .padding(.top, headerHeight)
                     if shown.elements.isEmpty {
                         ProgressView().padding(.top, headerHeight + 80)
                     }
@@ -120,10 +125,10 @@ struct PhotoWall<Header: View, Empty: View>: View {
         layoutID += 1
     }
 
-    private func select(_ element: WallElement) {
+    private func select(_ element: WallElement, from frame: CGRect?, image: UIImage?) {
         switch element.kind {
         case .tile(let item, _):
-            store.open(item, in: items)
+            store.open(item, in: items, from: frame, image: image)
         case .header:
             break
         case .card(let section):
@@ -143,6 +148,95 @@ private struct WallHeader<Content: View>: View {
         content()
             .offset(y: -scroll.distance)
             .opacity(scroll.distance > 200 ? 0 : 1)
+    }
+}
+
+/// Lets SwiftUI move the collection view directly, for the date scrubber.
+final class WallControl {
+    weak var collectionView: UICollectionView?
+
+    var maxDistance: CGFloat {
+        guard let view = collectionView else { return 0 }
+        return max(0, view.contentSize.height + view.adjustedContentInset.top + view.adjustedContentInset.bottom - view.bounds.height)
+    }
+
+    func scroll(toFraction fraction: CGFloat) {
+        guard let view = collectionView else { return }
+        let distance = maxDistance * min(max(fraction, 0), 1)
+        view.setContentOffset(CGPoint(x: 0, y: distance - view.adjustedContentInset.top), animated: false)
+    }
+}
+
+/// The handle on the right edge: drag it to travel through the years, with the month on screen.
+struct DateScrubber: View {
+    @ObservedObject var scroll: WallScroll
+    let control: WallControl
+    var label: (CGFloat) -> String?
+    @State private var visible = false
+    @State private var dragging = false
+    @State private var text: String?
+    @State private var hide: Task<Void, Never>?
+
+    var body: some View {
+        GeometryReader { geo in
+            let track = max(geo.size.height - 150, 1)
+            let maxDistance = control.maxDistance
+            let fraction = maxDistance > 0 ? min(max(scroll.distance / maxDistance, 0), 1) : 0
+            ZStack(alignment: .topTrailing) {
+                if visible || dragging {
+                    HStack(spacing: 8) {
+                        if dragging, let text {
+                            Text(text).font(.subheadline.weight(.semibold)).foregroundStyle(Palette.ink)
+                                .padding(.horizontal, 14).frame(height: 36)
+                                .liquidCapsule()
+                                .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .trailing)))
+                        }
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 13, weight: .bold)).foregroundStyle(Palette.accent)
+                            .frame(width: 34, height: 48)
+                            .liquidCapsule(interactive: true)
+                            .contentShape(Capsule())
+                            .gesture(
+                                DragGesture(minimumDistance: 0, coordinateSpace: .named("scrubber"))
+                                    .onChanged { value in
+                                        if !dragging { withAnimation(.easeOut(duration: 0.15)) { dragging = true } }
+                                        let next = min(max((value.location.y - 24) / track, 0), 1)
+                                        control.scroll(toFraction: next)
+                                        let newText = label(next * maxDistance)
+                                        if newText != text { text = newText }
+                                    }
+                                    .onEnded { _ in
+                                        withAnimation(.easeOut(duration: 0.2)) { dragging = false }
+                                        scheduleHide()
+                                    }
+                            )
+                            .accessibilityLabel("Barra de fechas")
+                            .accessibilityValue(text ?? "")
+                    }
+                    .sensoryFeedback(.selection, trigger: text)
+                    .offset(y: fraction * track)
+                    .padding(.trailing, 4)
+                    .transition(.opacity)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .coordinateSpace(name: "scrubber")
+        }
+        // Long walls only, and only while moving through them.
+        .onChange(of: scroll.distance) { _, distance in
+            guard !dragging, control.maxDistance > 3_000 else { return }
+            if distance > 200 { if !visible { withAnimation(.easeOut(duration: 0.2)) { visible = true } }; scheduleHide() }
+            else if visible { withAnimation { visible = false } }
+        }
+    }
+
+    private func scheduleHide() {
+        hide?.cancel()
+        hide = Task {
+            try? await Task.sleep(nanoseconds: 1_600_000_000)
+            guard !Task.isCancelled, !dragging else { return }
+            withAnimation(.easeOut(duration: 0.3)) { visible = false }
+        }
     }
 }
 
@@ -175,8 +269,9 @@ struct CollectionWall: UIViewRepresentable {
     var topInset: CGFloat
     var topRequest: Int
     var tracker: WallTracker
+    var control: WallControl
     var onScroll: (CGFloat, Bool) -> Void
-    var onSelect: (WallElement) -> Void
+    var onSelect: (WallElement, CGRect?, UIImage?) -> Void
     var refresh: () async -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -196,6 +291,7 @@ struct CollectionWall: UIViewRepresentable {
         control.addTarget(context.coordinator, action: #selector(Coordinator.refreshPulled(_:)), for: .valueChanged)
         view.refreshControl = control
         context.coordinator.lastTopRequest = topRequest
+        control.collectionView = view
         return container
     }
 
@@ -307,7 +403,14 @@ struct CollectionWall: UIViewRepresentable {
         func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
             collectionView.deselectItem(at: indexPath, animated: false)
             guard let element = element(collectionView, indexPath) else { return }
-            parent.onSelect(element)
+            // Where the tile is and what it shows, for the zoom into the viewer.
+            var frame: CGRect?, image: UIImage?
+            if let cell = collectionView.cellForItem(at: indexPath) {
+                let bounds = cell.bounds
+                frame = cell.convert(bounds, to: nil)
+                image = UIGraphicsImageRenderer(bounds: bounds).image { _ in cell.drawHierarchy(in: bounds, afterScreenUpdates: false) }
+            }
+            parent.onSelect(element, frame, image)
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {

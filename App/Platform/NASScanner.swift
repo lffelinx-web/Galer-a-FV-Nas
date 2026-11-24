@@ -1,61 +1,101 @@
 import Foundation
 
-/// Walks every folder under the WebDAV root, four listings at a time, and turns each
-/// photo or video into a `GalleryItem`. Synology system folders (`@eaDir`, `#recycle`)
-/// and hidden files are skipped.
+/// What a folder held at the last search, to skip it next time if it did not change.
+struct CachedFolder: Codable, Equatable {
+    /// The folder's modification date as its parent listed it.
+    var modified: Date?
+    /// A folder without subfolders: its date changes whenever a file is added or removed.
+    var leaf: Bool
+    /// Ids of the photos and videos directly inside.
+    var items: [String]
+}
+
+/// Walks every folder under the WebDAV root, several listings at a time, and turns each
+/// photo or video into a `GalleryItem`. A folder without subfolders whose date did not
+/// change since the last search is taken from the previous result instead of asking the
+/// NAS again, which makes a repeat search much faster. Synology system folders
+/// (`@eaDir`, `#recycle`) and hidden files are skipped.
 struct NASScanner {
     static let maxDepth = 12
     static let maxFolders = 20_000
     static let maxFiles = 300_000
-    static let parallel = 4
+    static let parallel = 6
+
+    struct Result {
+        var items: [GalleryItem]
+        var folders: [String: CachedFolder]
+        var reused: Int
+    }
 
     let account: NASAccount
     var learnedAspects: [String: Double] = [:]
+    var previousFolders: [String: CachedFolder] = [:]
+    var previousItems: [String: GalleryItem] = [:]
 
-    func scan(progress: @escaping @Sendable (String, Int) -> Void) async throws -> [GalleryItem] {
+    func scan(progress: @escaping @Sendable (String, Int) -> Void) async throws -> Result {
         let transport = NASTransport(account)
         let rootEntries = try await transport.list(account.root)
-        var items: [GalleryItem] = []
-        var pending: [(URL, [String])] = []
+        var result = Result(items: [], folders: [:], reused: 0)
+        var pending: [(url: URL, folders: [String], modified: Date?)] = []
         var visited = 1, failed = 0
-        collect(rootEntries, folders: [], into: &items, pending: &pending)
+        collect(rootEntries, folders: [], into: &result, pending: &pending)
         while !pending.isEmpty {
             try Task.checkCancellation()
             let batch = Array(pending.suffix(Self.parallel))
             pending.removeLast(batch.count)
             visited += batch.count
             guard visited <= Self.maxFolders else { throw GalleryError.message("El NAS tiene más de \(Self.maxFolders.formatted()) carpetas; elige una carpeta más específica en Configuración.") }
-            let results = await withTaskGroup(of: ([String], [DAVEntry]?).self) { group -> [([String], [DAVEntry]?)] in
-                for (url, folders) in batch {
-                    group.addTask { (folders, try? await transport.list(url)) }
+            let listed = await withTaskGroup(of: (Int, [DAVEntry]?).self) { group -> [(Int, [DAVEntry]?)] in
+                for (position, folder) in batch.enumerated() {
+                    group.addTask { (position, try? await transport.list(folder.url)) }
                 }
-                var out: [([String], [DAVEntry]?)] = []
-                for await result in group { out.append(result) }
+                var out: [(Int, [DAVEntry]?)] = []
+                for await entry in group { out.append(entry) }
                 return out
             }
             try Task.checkCancellation()
-            for (folders, entries) in results {
+            for (position, entries) in listed {
+                let folder = batch[position]
                 guard let entries else { failed += 1; continue }
-                collect(entries, folders: folders, into: &items, pending: &pending)
-                guard items.count <= Self.maxFiles else { throw GalleryError.message("El NAS tiene más de \(Self.maxFiles.formatted()) archivos; elige una carpeta más específica en Configuración.") }
+                let before = result.items.count
+                let hasSubfolders = collect(entries, folders: folder.folders, into: &result, pending: &pending)
+                result.folders[folder.url.absoluteString] = CachedFolder(modified: folder.modified, leaf: !hasSubfolders,
+                                                                        items: result.items[before...].map(\.id))
+                guard result.items.count <= Self.maxFiles else { throw GalleryError.message("El NAS tiene más de \(Self.maxFiles.formatted()) archivos; elige una carpeta más específica en Configuración.") }
             }
-            progress(batch.last?.1.joined(separator: "/") ?? "", items.count)
+            progress(batch.last?.folders.joined(separator: "/") ?? "", result.items.count)
         }
-        if failed > 0 && items.isEmpty { throw GalleryError.message("No se pudieron leer las carpetas del NAS.") }
-        return Self.removeLivePhotoVideos(items).sorted { $0.date > $1.date }
+        if failed > 0 && result.items.isEmpty { throw GalleryError.message("No se pudieron leer las carpetas del NAS.") }
+        result.items = Self.removeLivePhotoVideos(result.items).sorted { $0.date > $1.date }
+        return result
     }
 
-    private func collect(_ entries: [DAVEntry], folders: [String], into items: inout [GalleryItem], pending: inout [(URL, [String])]) {
+    /// Adds the files of one listing and queues its subfolders. Returns whether it had subfolders.
+    @discardableResult
+    private func collect(_ entries: [DAVEntry], folders: [String], into result: inout Result, pending: inout [(url: URL, folders: [String], modified: Date?)]) -> Bool {
+        var hasSubfolders = false
         for entry in entries where !Self.hidden(entry.name) {
             if entry.directory {
-                if folders.count < Self.maxDepth { pending.append((entry.url, folders + [entry.name])) }
+                hasSubfolders = true
+                guard folders.count < Self.maxDepth else { continue }
+                let key = entry.url.absoluteString
+                // Unchanged folder without subfolders: reuse what it held last time.
+                if let cached = previousFolders[key], cached.leaf, let modified = entry.modified, cached.modified == modified {
+                    // Ids missing from the previous result are Live Photo movies that were hidden.
+                    result.items.append(contentsOf: cached.items.compactMap { previousItems[$0] })
+                    result.folders[key] = cached
+                    result.reused += 1
+                    continue
+                }
+                pending.append((entry.url, folders + [entry.name], entry.modified))
             } else if let kind = entry.kind {
                 let id = "n:" + entry.url.absoluteString
                 let date = DateGuess.date(fileName: entry.name, folders: folders) ?? entry.modified ?? Date(timeIntervalSince1970: 0)
-                items.append(GalleryItem(id: id, source: .nas(entry.url), date: date, kind: kind, aspect: learnedAspects[id] ?? 1,
-                                         duration: nil, name: entry.name, bytes: entry.bytes, folder: folders.joined(separator: "/")))
+                result.items.append(GalleryItem(id: id, source: .nas(entry.url), date: date, kind: kind, aspect: learnedAspects[id] ?? 1,
+                                                duration: nil, name: entry.name, bytes: entry.bytes, folder: folders.joined(separator: "/")))
             }
         }
+        return hasSubfolders
     }
 
     static func hidden(_ name: String) -> Bool {
