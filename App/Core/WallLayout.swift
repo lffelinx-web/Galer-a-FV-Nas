@@ -6,7 +6,8 @@ struct WallElement {
     enum Kind {
         case tile(GalleryItem, corner: CGFloat)
         case header(TimelineSection)
-        case year(TimelineSection)
+        /// A month or a year: a large cover photo with its title.
+        case card(TimelineSection)
     }
     let kind: Kind
     let frame: CGRect
@@ -25,7 +26,6 @@ struct WallBand {
 /// thread; the collection view only asks for what is on screen.
 struct WallLayout {
     static let spacing: CGFloat = 4
-    static let columns = 4
 
     var elements: [WallElement] = []
     var bands: [WallBand] = []
@@ -71,28 +71,12 @@ struct WallLayout {
                     add(tiles, top: y, bottom: y + block.height + spacing)
                     y += block.height + spacing
                 }
-            case .months:
-                let headerHeight: CGFloat = 52
-                add([WallElement(kind: .header(section), frame: CGRect(x: 0, y: y, width: width, height: headerHeight), date: section.date)], top: y, bottom: y + headerHeight)
-                y += headerHeight
-                let side = ((inner - spacing * CGFloat(columns - 1)) / CGFloat(columns)).rounded(.down)
-                var start = 0
-                while start < section.items.count {
-                    let end = min(start + columns, section.items.count)
-                    let row = (start..<end).map { index in
-                        WallElement(kind: .tile(section.items[index], corner: 6),
-                                    frame: CGRect(x: pad + CGFloat(index - start) * (side + spacing), y: y, width: side, height: side),
-                                    date: section.items[index].date)
-                    }
-                    add(row, top: y, bottom: y + side + spacing)
-                    y += side + spacing
-                    start = end
-                }
-            case .years:
-                let cardHeight: CGFloat = 240
-                add([WallElement(kind: .year(section), frame: CGRect(x: pad + 4, y: y, width: inner - 8, height: cardHeight), date: section.date)],
-                    top: y, bottom: y + cardHeight + 14)
-                y += cardHeight + 14
+            case .months, .years:
+                let cardHeight: CGFloat = scale == .years ? 240 : 190
+                if y == 0 { y = 6 }
+                add([WallElement(kind: .card(section), frame: CGRect(x: pad + 4, y: y, width: inner - 8, height: cardHeight), date: section.date)],
+                    top: y, bottom: y + cardHeight + 12)
+                y += cardHeight + 12
             }
         }
         layout.elements = elements

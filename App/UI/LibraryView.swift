@@ -94,13 +94,13 @@ struct PhotoWall<Header: View, Empty: View>: View {
         switch element.kind {
         case .tile(let item, _):
             store.open(item, in: items)
-        case .header(let section):
-            guard scale == .months else { return }
+        case .header:
+            break
+        case .card(let section):
+            // A year opens its months; a month opens its days.
             focus = section.date
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { scale = .days }
-        case .year(let section):
-            focus = section.date
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { scale = .months }
+            let next: TimeScale = layout.scale == .years ? .months : .days
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { scale = next }
         }
     }
 }
@@ -207,15 +207,16 @@ struct CollectionWall: UIViewRepresentable {
             case .header(let section):
                 let scale = wall.scale
                 cell.contentConfiguration = UIHostingConfiguration { SectionHeader(section: section, scale: scale) }.margins(.all, 0)
-            case .year(let section):
-                cell.contentConfiguration = UIHostingConfiguration { YearCard(section: section) }.margins(.all, 0)
+            case .card(let section):
+                let scale = wall.scale
+                cell.contentConfiguration = UIHostingConfiguration { PeriodCard(section: section, scale: scale) }.margins(.all, 0)
             }
             return cell
         }
 
         func collectionView(_ collectionView: UICollectionView, shouldHighlightItemAt indexPath: IndexPath) -> Bool {
             guard let element = element(collectionView, indexPath) else { return false }
-            if case .header = element.kind { return wall.scale == .months }
+            if case .header = element.kind { return false }
             return true
         }
 
@@ -240,7 +241,9 @@ struct CollectionWall: UIViewRepresentable {
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
-            let distance = scrollView.contentOffset.y + scrollView.adjustedContentInset.top
+            // Clamped, so the bounce at the bottom does not count as scrolling up.
+            let maxDistance = max(0, scrollView.contentSize.height + scrollView.adjustedContentInset.top + scrollView.adjustedContentInset.bottom - scrollView.bounds.height)
+            let distance = min(scrollView.contentOffset.y + scrollView.adjustedContentInset.top, maxDistance)
             parent.tracker.distance = distance
             parent.tracker.topDate = wall.date(at: distance + 20)
             parent.onScroll(distance)
@@ -296,21 +299,15 @@ struct LibraryView: View {
     @Binding var compact: Bool
     var topRequest: Int
     var openSettings: () -> Void
+    @State private var direction = BarDirection()
 
     var body: some View {
         PhotoWall(items: store.items, revision: store.revision, scale: $scale, topRequest: topRequest,
-                  onScroll: updateCompact, refresh: { await store.refresh() }) {
+                  onScroll: { direction.apply($0, to: $compact) }, refresh: { await store.refresh() }) {
             header
         } empty: {
             empty
         }
-    }
-
-    /// The bar splits once the photos reach the top, and joins again near the top.
-    private func updateCompact(_ distance: CGFloat) {
-        let next = compact ? distance > 30 : distance > 90
-        guard next != compact else { return }
-        withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) { compact = next }
     }
 
     private var header: some View {
@@ -352,6 +349,32 @@ struct LibraryView: View {
     }
 }
 
+/// Which bar to show, from the direction of the scroll: scrolling down into the photos
+/// shows Días · Meses · Años; scrolling up brings back the main bar, wherever you are.
+final class BarDirection {
+    private var last: CGFloat = 0
+    private var anchor: CGFloat = 0
+    private var goingDown = true
+
+    /// True for the scale bar, false for the main bar, nil to leave it as it is.
+    func update(_ distance: CGFloat) -> Bool? {
+        defer { last = distance }
+        let delta = distance - last
+        // A jump (a new scale or a tap on Inicio) is not a gesture.
+        if abs(delta) > 400 { anchor = distance; return nil }
+        if distance < 40 { anchor = distance; return false }
+        if delta != 0, (delta > 0) != goingDown { goingDown = delta > 0; anchor = last }
+        if goingDown && distance - anchor > 24 { return true }
+        if !goingDown && anchor - distance > 24 { return false }
+        return nil
+    }
+
+    func apply(_ distance: CGFloat, to compact: Binding<Bool>) {
+        guard let next = update(distance), next != compact.wrappedValue else { return }
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) { compact.wrappedValue = next }
+    }
+}
+
 /// «Buscando fotos en el NAS…» or «Ordenando por fecha de captura…» while it works.
 struct ScanBanner: View {
     @EnvironmentObject var store: GalleryStore
@@ -390,9 +413,10 @@ struct SectionHeader: View {
     }
 }
 
-/// One year in Años: a large photo with the year over it.
-struct YearCard: View {
+/// One month in Meses or one year in Años: a large photo with its title over it.
+struct PeriodCard: View {
     var section: TimelineSection
+    var scale: TimeScale
 
     private var cover: GalleryItem? {
         section.items.first { $0.favorite && !$0.isVideo } ?? section.items.first { !$0.isVideo } ?? section.items.first
@@ -404,7 +428,7 @@ struct YearCard: View {
                 if let cover { Thumbnail(item: cover, pixelSize: geo.size.width).frame(width: geo.size.width, height: geo.size.height) }
                 LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .center, endPoint: .bottom)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(section.title).font(.system(size: 40, weight: .bold))
+                    Text(section.title).font(.system(size: scale == .years ? 40 : 30, weight: .bold)).lineLimit(1).minimumScaleFactor(0.7)
                     Text(mediaSummary(section.items)).font(.subheadline.weight(.medium)).opacity(0.9)
                 }
                 .foregroundStyle(.white)

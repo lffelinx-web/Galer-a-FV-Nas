@@ -20,14 +20,17 @@ enum AppTab: String, CaseIterable, Identifiable {
 struct MainView: View {
     @EnvironmentObject var store: GalleryStore
     @State private var tab = AppTab.library
-    @State private var scale = TimeScale.days
+    @State private var libraryScale = TimeScale.days
+    @State private var nasScale = TimeScale.days
     @State private var compact = false
-    @State private var topRequest = 0
+    @State private var libraryTop = 0
+    @State private var nasTop = 0
     @State private var opened: Set<AppTab> = [.library]
     @Namespace private var glass
     @Namespace private var lens
 
-    private var showCompact: Bool { tab == .library && compact }
+    /// Fototeca and NAS both split their bar while scrolling down through the photos.
+    private var showCompact: Bool { (tab == .library || tab == .nas) && compact }
 
     var body: some View {
         GeometryReader { geo in
@@ -48,7 +51,7 @@ struct MainView: View {
                     .frame(height: geo.safeAreaInsets.top + 14)
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
-                    .opacity(tab == .library && compact ? 1 : 0)
+                    .opacity(showCompact ? 1 : 0)
             }
             .overlay(alignment: .bottom) {
                 bar
@@ -63,8 +66,8 @@ struct MainView: View {
 
     @ViewBuilder private func screen(_ item: AppTab) -> some View {
         switch item {
-        case .library: LibraryView(scale: $scale, compact: $compact, topRequest: topRequest, openSettings: { select(.settings) })
-        case .nas: NASView(openSettings: { select(.settings) })
+        case .library: LibraryView(scale: $libraryScale, compact: $compact, topRequest: libraryTop, openSettings: { select(.settings) })
+        case .nas: NASView(scale: $nasScale, compact: $compact, topRequest: nasTop, openSettings: { select(.settings) })
         case .albums: AlbumsView()
         case .settings: SettingsView()
         }
@@ -76,7 +79,7 @@ struct MainView: View {
                 if showCompact {
                     GlassCircleButton(systemImage: "house.fill", label: "Inicio", id: "home", namespace: glass, size: 56) { goHome() }
                     Spacer(minLength: 0)
-                    ScaleSwitcher(scale: $scale, namespace: lens)
+                    ScaleSwitcher(scale: tab == .nas ? $nasScale : $libraryScale, namespace: lens)
                         .glassPiece(Capsule(), id: "bar", in: glass)
                     Spacer(minLength: 0)
                     GlassCircleButton(systemImage: "gearshape.fill", label: "Configuración", id: "gear", namespace: glass, size: 56) { select(.settings) }
@@ -92,16 +95,25 @@ struct MainView: View {
 
     private func select(_ item: AppTab) {
         if item == tab {
-            if item == .library { topRequest += 1 }
+            scrollToTop()
             return
         }
         opened.insert(item)
-        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { tab = item }
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { tab = item; compact = false }
     }
 
+    /// Inicio: back to the top of the photos you are looking at, where the main bar returns.
     private func goHome() {
-        if tab != .library { withAnimation { tab = .library } }
-        topRequest += 1
+        scrollToTop()
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) { compact = false }
+    }
+
+    private func scrollToTop() {
+        switch tab {
+        case .library: libraryTop += 1
+        case .nas: nasTop += 1
+        default: break
+        }
     }
 }
 

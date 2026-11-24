@@ -4,12 +4,15 @@ import SwiftUI
 /// header. The details and actions live in the «…» menu.
 struct NASView: View {
     @EnvironmentObject var store: GalleryStore
+    @Binding var scale: TimeScale
+    @Binding var compact: Bool
+    var topRequest: Int
     var openSettings: () -> Void
-    @State private var scale = TimeScale.days
+    @State private var direction = BarDirection()
 
     var body: some View {
-        PhotoWall(items: store.nasItems, revision: store.nasRevision, scale: $scale, topRequest: 0,
-                  onScroll: { _ in }, refresh: { await store.checkConnection() }) {
+        PhotoWall(items: store.nasItems, revision: store.nasRevision, scale: $scale, topRequest: topRequest,
+                  onScroll: { direction.apply($0, to: $compact) }, refresh: { await store.checkConnection() }) {
             header
         } empty: {
             empty

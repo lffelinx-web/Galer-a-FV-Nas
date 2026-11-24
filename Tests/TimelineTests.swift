@@ -135,16 +135,19 @@ final class WallLayoutTests: XCTestCase {
         }
     }
 
-    func testEveryPhotoIsPlacedOnceInEveryScale() {
+    func testEveryPhotoIsPlacedOnceAndPeriodsAreCards() {
         let all = items(500)
-        for scale in [TimeScale.days, .months] {
+        let days = WallLayout.build(all, scale: .days, width: 393)
+        var ids: [String] = []
+        for element in days.elements { if case .tile(let item, _) = element.kind { ids.append(item.id) } }
+        XCTAssertEqual(ids.sorted(), all.map(\.id).sorted())
+        XCTAssertTrue(days.elements.allSatisfy { $0.frame.maxX <= 393.5 && $0.frame.minX >= 0 })
+        // Months and years: one card each.
+        for scale in [TimeScale.months, .years] {
             let layout = WallLayout.build(all, scale: scale, width: 393)
-            var ids: [String] = []
-            for element in layout.elements { if case .tile(let item, _) = element.kind { ids.append(item.id) } }
-            XCTAssertEqual(ids.sorted(), all.map(\.id).sorted(), "\(scale)")
-            XCTAssertTrue(layout.elements.allSatisfy { $0.frame.maxX <= 393.5 && $0.frame.minX >= 0 })
+            XCTAssertEqual(layout.elements.count, Timeline.sections(all, scale: scale).count, "\(scale)")
+            XCTAssertTrue(layout.elements.allSatisfy { if case .card = $0.kind { return true } else { return false } })
         }
-        XCTAssertFalse(WallLayout.build(all, scale: .years, width: 393).elements.isEmpty)
     }
 
     func testVisibleElementsMatchABruteForceSearch() {
@@ -219,5 +222,19 @@ final class DuplicateTests: XCTestCase {
         ]
         let kept = GalleryStore.removingDuplicates(nas, of: phone, checked: ["copy", "video", "other"])
         XCTAssertEqual(kept.map(\.id), ["other", "unread"])
+    }
+}
+
+final class BarDirectionTests: XCTestCase {
+    func testScrollDirectionPicksTheBar() {
+        let direction = BarDirection()
+        XCTAssertEqual(direction.update(0), false)
+        var result: Bool?
+        for y in stride(from: CGFloat(10), through: 600, by: 10) { if let value = direction.update(y) { result = value } }
+        XCTAssertEqual(result, true, "scrolling down shows Días · Meses · Años")
+        result = nil
+        for y in stride(from: CGFloat(590), through: 500, by: -10) { if let value = direction.update(y) { result = value } }
+        XCTAssertEqual(result, false, "scrolling up brings back the main bar")
+        XCTAssertNil(direction.update(4_000), "a jump is not a gesture")
     }
 }
