@@ -68,6 +68,14 @@ struct MainView: View {
             }
         }
         .fullScreenCover(item: $store.viewer) { ViewerView(context: $0).environmentObject(store) }
+        .onChange(of: store.dayRequest) { _, request in
+            // «Ver en el día» from the viewer: that date in the mosaic, in Fototeca or NAS.
+            guard let request else { return }
+            let target: AppTab = request.nas ? .nas : .library
+            if tab != target { opened.insert(target); tab = target }
+            compact = false
+            if request.nas { nasJump = DateJump(date: request.date) } else { libraryJump = DateJump(date: request.date) }
+        }
         .sheet(isPresented: $choosingDate) {
             DateJumpSheet(items: tab == .nas ? store.nasShown : store.items) { date in
                 if tab == .nas { nasJump = DateJump(date: date) } else { libraryJump = DateJump(date: date) }

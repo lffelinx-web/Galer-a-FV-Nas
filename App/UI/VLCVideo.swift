@@ -31,6 +31,8 @@ final class VLCController: ObservableObject {
     func load(_ url: URL, start: Double) {
         let media = VLCMedia(url: url)
         media.addOption(":network-caching=3000")
+        // Plays in a loop, like the other videos of the gallery.
+        media.addOption(":input-repeat=65535")
         if start > 0 { media.addOption(":start-time=\(Int(start))") }
         player.media = media
         let player = player
@@ -120,50 +122,64 @@ struct VLCVideoView: UIViewRepresentable {
     func updateUIView(_ uiView: UIView, context: Context) {}
 }
 
-/// A video VLC plays inside the viewer (MKV, AVI, WebM…), with simple controls.
+/// A video VLC plays inside the viewer (MKV, AVI, WebM…): it starts by itself, loops and
+/// follows the viewer's controls and sound setting.
 struct VLCInlinePlayer: View {
     let url: URL
     let active: Bool
+    let chrome: Bool
+    let muted: Bool
+    var toggleChrome: () -> Void
     @StateObject private var controller = VLCController()
-    @State private var controlsVisible = true
     @State private var scrubbing: Double?
 
     var body: some View {
         ZStack {
             Color.black
             VLCVideoView(player: controller.player).allowsHitTesting(false)
-            Color.clear.contentShape(Rectangle()).onTapGesture { withAnimation { controlsVisible.toggle() } }
+            Color.clear.contentShape(Rectangle()).onTapGesture { toggleChrome() }
             if controller.loading { ProgressView().tint(.white) }
             if controller.failed {
                 Label("No se pudo reproducir este video.", systemImage: "exclamationmark.triangle").foregroundStyle(.white)
             }
-            if controlsVisible { controls.transition(.opacity) }
+            if chrome { controls.transition(.opacity) }
         }
-        .onAppear { controller.load(url, start: 0) }
-        .onChange(of: active) { _, isActive in if !isActive && controller.playing { controller.togglePlay() } }
+        .onAppear {
+            controller.load(url, start: 0)
+            applyVolume()
+        }
+        .onChange(of: active) { _, isActive in
+            if isActive != controller.playing { controller.togglePlay() }
+        }
+        .onChange(of: muted) { applyVolume() }
         .onDisappear { controller.stop() }
     }
+
+    private func applyVolume() { controller.player.audio?.volume = muted ? 0 : 100 }
 
     private var controls: some View {
         VStack {
             Spacer()
-            HStack(spacing: 14) {
+            HStack(spacing: 10) {
                 Button { controller.togglePlay() } label: {
-                    Image(systemName: controller.playing ? "pause.fill" : "play.fill").font(.title2).foregroundStyle(.white).frame(width: 44, height: 44)
+                    Image(systemName: controller.playing ? "pause.fill" : "play.fill").font(.system(size: 17, weight: .semibold)).frame(width: 34, height: 34)
                 }
                 .accessibilityLabel(controller.playing ? "Pausa" : "Reproducir")
-                Text(durationText(scrubbing.map { $0 * controller.length } ?? controller.time)).font(.caption.monospacedDigit()).foregroundStyle(.white)
+                Text(durationText(scrubbing.map { $0 * controller.length } ?? controller.time)).font(.caption.monospacedDigit())
                 Slider(value: Binding(get: { scrubbing ?? (controller.length > 0 ? controller.time / controller.length : 0) },
                                       set: { scrubbing = $0 }),
                        onEditingChanged: { editing in
                            if !editing, let value = scrubbing { controller.seek(to: value); scrubbing = nil }
                        })
-                    .tint(.white)
-                Text(durationText(controller.length)).font(.caption.monospacedDigit()).foregroundStyle(.white.opacity(0.8))
+                    .tint(Palette.accent)
+                Text(durationText(controller.length)).font(.caption.monospacedDigit()).foregroundStyle(Palette.secondary)
             }
-            .padding(.horizontal, 16).padding(.vertical, 8)
-            .background(.black.opacity(0.45), in: Capsule())
-            .padding(.horizontal, 12).padding(.bottom, 40)
+            .foregroundStyle(Palette.ink)
+            .buttonStyle(PressStyle())
+            .padding(.horizontal, 12).frame(height: 48)
+            .liquidCapsule()
+            .padding(.horizontal, 14)
+            .padding(.bottom, 168)
         }
     }
 }
@@ -174,6 +190,9 @@ struct VLCInlinePlayer: View {
 struct VLCInlinePlayer: View {
     let url: URL
     let active: Bool
+    let chrome: Bool
+    let muted: Bool
+    var toggleChrome: () -> Void
     var body: some View {
         Label("Este formato necesita el reproductor VLC.", systemImage: "film").foregroundStyle(.white)
     }

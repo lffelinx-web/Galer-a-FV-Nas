@@ -105,7 +105,7 @@ struct SettingsView: View {
                     }
                     LabeledContent("Fotos y videos", value: store.phoneItems.isEmpty ? "—" : mediaSummary(store.phoneItems))
                 } header: { Text("Fotos del iPhone") } footer: {
-                    Text("LF’AZ Galería solo lee tu fototeca; no cambia ni borra nada.")
+                    Text("LF’AZ Galería solo lee tu fototeca: no cambia ni borra nada. Solo agrega una foto cuando tú eliges «Guardar en el iPhone» en una del NAS.")
                 }
 
                 if store.account != nil {

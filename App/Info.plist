@@ -48,6 +48,8 @@
 	<string>LF’AZ Galería muestra las fotos y videos de este iPhone junto con los de tu NAS. Solo los lee; no cambia ni borra nada.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>LF’AZ Galería usa Face ID para abrir tus fotos ocultas.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>LF’AZ Galería guarda en tu iPhone las fotos del NAS que tú eliges con «Guardar en el iPhone».</string>
 	<key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>

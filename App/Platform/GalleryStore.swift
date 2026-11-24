@@ -53,6 +53,16 @@ struct ViewerContext: Identifiable {
     /// The tapped tile on screen and what it showed, for the zoom in and out.
     var sourceFrame: CGRect?
     var sourceImage: UIImage?
+    /// The source image is the whole photo with its real shape, not the tile's crop.
+    var sourceIsWhole = false
+}
+
+/// «Ver en el día»: show this date in the mosaic.
+struct DayRequest: Equatable {
+    let id = UUID()
+    let date: Date
+    /// Only in the NAS tab (the photo is not in Fototeca).
+    let nas: Bool
 }
 
 /// The app state: the iPhone library, the NAS index, the merged timeline and the app's
@@ -84,6 +94,7 @@ final class GalleryStore: ObservableObject {
     @Published private(set) var connecting = false
     @Published private(set) var albums: [AppAlbum] = []
     @Published var viewer: ViewerContext?
+    @Published var dayRequest: DayRequest?
     @Published var error: String?
     @Published var showPhone = UserDefaults.standard.object(forKey: "showPhone") as? Bool ?? true {
         didSet { UserDefaults.standard.set(showPhone, forKey: "showPhone"); merge() }
@@ -540,7 +551,14 @@ final class GalleryStore: ObservableObject {
     func open(_ item: GalleryItem, in list: [GalleryItem], from frame: CGRect? = nil, image: UIImage? = nil) {
         let position = list.firstIndex { $0.id == item.id } ?? 0
         let window = list.isEmpty ? [item] : Array(list[max(0, position - 400)..<min(list.count, position + 400)])
-        let context = ViewerContext(items: window, start: item.id, sourceFrame: frame, sourceImage: image)
+        // The whole photo with its real shape, so the zoom ends exactly where the viewer begins.
+        let whole: UIImage? = frame == nil ? nil : {
+            switch item.source {
+            case .nas(let url): return NASImageLoader.shared.cached(url)
+            case .phone(let id): return PhoneLibrary.shared.quickImage(id, pixels: 900)
+            }
+        }()
+        let context = ViewerContext(items: window, start: item.id, sourceFrame: frame, sourceImage: whole ?? image, sourceIsWhole: whole != nil)
         // With a source tile the viewer draws its own zoom, so the system slide is turned off.
         var transaction = Transaction()
         transaction.disablesAnimations = frame != nil && image != nil

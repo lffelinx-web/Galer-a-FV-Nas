@@ -111,6 +111,21 @@ final class PhoneLibrary: NSObject, PHPhotoLibraryChangeObserver {
         }
     }
 
+    /// A quick picture of the whole photo, from what Photos already has at hand.
+    func quickImage(_ id: String, pixels: CGFloat) -> UIImage? {
+        guard let asset = asset(id) else { return nil }
+        let options = PHImageRequestOptions()
+        options.isSynchronous = true
+        options.deliveryMode = .fastFormat
+        options.resizeMode = .fast
+        options.isNetworkAccessAllowed = false
+        var result: UIImage?
+        manager.requestImage(for: asset, targetSize: CGSize(width: pixels, height: pixels), contentMode: .aspectFit, options: options) { image, _ in
+            result = image
+        }
+        return result
+    }
+
     func livePhoto(_ id: String, pixels: CGSize) -> AsyncStream<PHLivePhoto> {
         AsyncStream { continuation in
             guard let asset = asset(id) else { continuation.finish(); return }

@@ -1,10 +1,10 @@
 import SwiftUI
 import AVKit
-import Photos
-import PhotosUI
+import MapKit
 
 /// Full-screen viewer: swipe sideways between photos, pinch or double tap to zoom, swipe
-/// down to close.
+/// down to close and up for the information. Below, the neighbours in a strip and the
+/// actions: Compartir, Favorito, Información and Más.
 struct ViewerView: View {
     let context: ViewerContext
     @EnvironmentObject var store: GalleryStore
@@ -14,6 +14,10 @@ struct ViewerView: View {
     @State private var zoomed = false
     @State private var dragY: CGFloat = 0
     @State private var albumItem: GalleryItem?
+    @State private var infoItem: GalleryItem?
+    @State private var shareFile: ShareFile?
+    @State private var working: String?
+    @State private var toast: String?
     /// 0: the photo sits on its tile; 1: it fills the screen. Animated when opening and closing.
     @State private var progress: CGFloat
     @State private var settled: Bool
@@ -41,7 +45,7 @@ struct ViewerView: View {
             ScrollView(.horizontal) {
                 LazyHStack(spacing: 0) {
                     ForEach(context.items) { item in
-                        ViewerPage(item: item, active: item.id == current,
+                        ViewerPage(item: item, active: item.id == current, chrome: chrome && settled, poster: poster(for: item),
                                    toggleChrome: { withAnimation(.easeInOut(duration: 0.2)) { chrome.toggle() } },
                                    zoomChanged: { zoomed = $0 })
                             .containerRelativeFrame([.horizontal, .vertical])
@@ -57,12 +61,34 @@ struct ViewerView: View {
             .ignoresSafeArea()
             .offset(y: dragY)
             .scaleEffect(1 - min(dragY / 2500, 0.15))
-            .simultaneousGesture(closeGesture, including: zoomed ? .none : .all)
+            .simultaneousGesture(verticalGesture, including: zoomed ? .none : .all)
             .opacity(settled ? 1 : 0)
             if !settled { zoomLayer }
         }
         .overlay(alignment: .top) {
             if chrome && settled { topBar.transition(.move(edge: .top).combined(with: .opacity)) }
+        }
+        .overlay(alignment: .bottom) {
+            if chrome && settled { bottomBar.transition(.move(edge: .bottom).combined(with: .opacity)) }
+        }
+        .overlay {
+            if let working {
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text(working).font(.subheadline.weight(.medium)).foregroundStyle(Palette.ink)
+                }
+                .padding(22)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            }
+        }
+        .overlay(alignment: .top) {
+            if let toast {
+                Text(toast).font(.subheadline.weight(.semibold)).foregroundStyle(Palette.ink)
+                    .padding(.horizontal, 18).frame(height: 42)
+                    .liquidCapsule()
+                    .padding(.top, 70)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
         }
         .presentationBackground(.clear)
         .onAppear {
@@ -71,10 +97,22 @@ struct ViewerView: View {
         }
         .statusBarHidden(!chrome)
         .sheet(item: $albumItem) { AddToAlbumSheet(itemID: $0.id).environmentObject(store) }
+        .sheet(item: $infoItem) { InfoSheet(item: $0).environmentObject(store) }
+        .sheet(item: $shareFile) { ActivitySheet(items: [$0.url]).ignoresSafeArea() }
         .onChange(of: current) { zoomed = false }
     }
 
-    /// The tile's picture moving between its place in the wall and the full screen.
+    /// The picture the page shows at once: the uncropped one from the tap for the first
+    /// photo, otherwise the NAS thumbnail already in memory.
+    private func poster(for item: GalleryItem) -> UIImage? {
+        if item.id == context.start, context.sourceIsWhole, let image = context.sourceImage { return image }
+        return item.nasURL.flatMap { NASImageLoader.shared.cached($0) }
+    }
+
+    // MARK: Zoom in and out
+
+    /// The tapped photo moving between its tile and the full screen. The picture keeps its
+    /// real shape; the frame around it opens from the tile's crop to the whole photo.
     private var zoomLayer: some View {
         GeometryReader { geo in
             if let image = context.sourceImage, let source = context.sourceFrame {
@@ -96,7 +134,8 @@ struct ViewerView: View {
     }
 
     private func aspect(of image: UIImage) -> CGFloat {
-        if let item = context.items.first(where: { $0.id == context.start }), item.aspect != 1, item.aspect > 0 { return CGFloat(item.aspect) }
+        if context.sourceIsWhole, image.size.height > 0 { return image.size.width / image.size.height }
+        if let item = context.items.first(where: { $0.id == context.start }), item.aspect > 0 { return CGFloat(item.aspect) }
         return image.size.height > 0 ? image.size.width / image.size.height : 1
     }
 
@@ -121,17 +160,22 @@ struct ViewerView: View {
         }
     }
 
-    private var closeGesture: some Gesture {
+    /// Down closes, up opens the information.
+    private var verticalGesture: some Gesture {
         DragGesture(minimumDistance: 24)
             .onChanged { value in
                 guard value.translation.height > 0, abs(value.translation.height) > abs(value.translation.width) * 1.4 else { return }
                 dragY = value.translation.height
             }
             .onEnded { value in
+                let vertical = abs(value.translation.height) > abs(value.translation.width) * 1.4
+                if vertical && value.translation.height < -60 { infoItem = currentItem; return }
                 if dragY > 130 || value.predictedEndTranslation.height > 400 && dragY > 40 { close() }
                 else { withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { dragY = 0 } }
             }
     }
+
+    // MARK: Bars
 
     private var topBar: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -148,45 +192,66 @@ struct ViewerView: View {
                     Text(detail(item)).font(.caption).foregroundStyle(Palette.secondary).lineLimit(1)
                 }
                 .foregroundStyle(Palette.ink)
-                .padding(.horizontal, 14).frame(height: 46)
+                .padding(.horizontal, 16).frame(height: 46)
                 .liquidCapsule()
-                .layoutPriority(-1)
-                Spacer(minLength: 0)
-                actions(item)
-            } else {
-                Spacer(minLength: 0)
             }
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 14)
         .padding(.top, 4)
     }
 
-    /// Favorito, Agregar a álbum and Ocultar, in one glass capsule.
+    private var bottomBar: some View {
+        VStack(spacing: 10) {
+            Filmstrip(items: context.items, current: $current)
+            if let item = currentItem { actions(item) }
+        }
+        .padding(.bottom, 6)
+    }
+
+    /// Compartir · Favorito · Información · Más.
     private func actions(_ item: GalleryItem) -> some View {
         let favorite = store.isFavorite(item)
         let hidden = store.isHidden(item)
         return HStack(spacing: 0) {
-            Button { store.toggleFavorite(item) } label: {
-                Image(systemName: favorite ? "heart.fill" : "heart").foregroundStyle(favorite ? Color.red : Palette.ink)
-                    .frame(width: 42, height: 46).contentShape(Rectangle())
+            barButton("square.and.arrow.up", "Compartir") { Task { await share(item) } }
+            barButton(favorite ? "heart.fill" : "heart", favorite ? "Quitar de favoritos" : "Favorito", tint: favorite ? .red : nil) {
+                store.toggleFavorite(item)
             }
-            .accessibilityLabel(favorite ? "Quitar de favoritos" : "Agregar a favoritos")
             .sensoryFeedback(.impact(weight: .light), trigger: favorite)
-            Button { albumItem = item } label: {
-                Image(systemName: "rectangle.stack.badge.plus").foregroundStyle(Palette.ink)
-                    .frame(width: 42, height: 46).contentShape(Rectangle())
+            barButton("info.circle", "Información") { infoItem = item }
+            Menu {
+                Button { albumItem = item } label: { Label("Agregar a álbum", systemImage: "rectangle.stack.badge.plus") }
+                if item.isNAS {
+                    Button { Task { await saveToPhone(item) } } label: { Label("Guardar en el iPhone", systemImage: "square.and.arrow.down") }
+                }
+                if !item.isVideo {
+                    Button { Task { await copy(item) } } label: { Label("Copiar", systemImage: "doc.on.doc") }
+                }
+                Button { showDay(item) } label: { Label("Ver en el día", systemImage: "calendar") }
+                Divider()
+                Button { store.setHidden(item, !hidden) } label: {
+                    Label(hidden ? "Mostrar en Fototeca" : "Ocultar", systemImage: hidden ? "eye" : "eye.slash")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle").frame(maxWidth: .infinity).frame(height: 54).contentShape(Rectangle())
             }
-            .accessibilityLabel("Agregar a álbum")
-            Button { store.setHidden(item, !hidden) } label: {
-                Image(systemName: hidden ? "eye" : "eye.slash").foregroundStyle(Palette.ink)
-                    .frame(width: 42, height: 46).contentShape(Rectangle())
-            }
-            .accessibilityLabel(hidden ? "Mostrar en Fototeca" : "Ocultar")
+            .accessibilityLabel("Más")
         }
-        .font(.system(size: 17, weight: .semibold))
-        .buttonStyle(PressStyle())
-        .padding(.horizontal, 4)
+        .font(.system(size: 20, weight: .semibold))
+        .foregroundStyle(Palette.ink)
+        .padding(.horizontal, 10)
         .liquidCapsule()
+        .padding(.horizontal, 22)
+    }
+
+    private func barButton(_ symbol: String, _ label: String, tint: Color? = nil, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).foregroundStyle(tint ?? Palette.ink)
+                .frame(maxWidth: .infinity).frame(height: 54).contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle())
+        .accessibilityLabel(label)
     }
 
     private func detail(_ item: GalleryItem) -> String {
@@ -196,6 +261,48 @@ struct ViewerView: View {
             return "\(time) · NAS · \(place)"
         }
         return "\(time) · iPhone"
+    }
+
+    // MARK: Actions
+
+    private func share(_ item: GalleryItem) async {
+        guard let file = await prepare(item, message: item.isNAS ? "Descargando del NAS…" : "Preparando…") else { return }
+        shareFile = ShareFile(url: file)
+    }
+
+    private func saveToPhone(_ item: GalleryItem) async {
+        guard let file = await prepare(item, message: "Descargando del NAS…") else { return }
+        do {
+            try await ItemExport.saveToPhone(file, isVideo: item.isVideo)
+            show("Guardada en el iPhone")
+        } catch {
+            store.error = "No se pudo guardar en el iPhone. Revisa el permiso de Fotos en Ajustes."
+        }
+    }
+
+    private func copy(_ item: GalleryItem) async {
+        guard let file = await prepare(item, message: "Preparando…") else { return }
+        do { try ItemExport.copy(file); show("Copiada") } catch { store.error = error.localizedDescription }
+    }
+
+    private func showDay(_ item: GalleryItem) {
+        store.dayRequest = DayRequest(date: item.date, nas: item.isNAS && !store.items.contains { $0.id == item.id })
+        dismiss()
+    }
+
+    private func prepare(_ item: GalleryItem, message: String) async -> URL? {
+        working = message
+        defer { working = nil }
+        do { return try await ItemExport.file(for: item, account: store.account) }
+        catch { store.error = error.localizedDescription; return nil }
+    }
+
+    private func show(_ text: String) {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { toast = text }
+        Task {
+            try? await Task.sleep(nanoseconds: 1_800_000_000)
+            withAnimation(.easeOut(duration: 0.3)) { toast = nil }
+        }
     }
 }
 
@@ -209,272 +316,123 @@ extension View {
     }
 }
 
-struct ViewerPage: View {
-    let item: GalleryItem
-    let active: Bool
-    var toggleChrome: () -> Void
-    var zoomChanged: (Bool) -> Void
+// MARK: Filmstrip
+
+/// The photos around the current one, small, to move quickly between them.
+struct Filmstrip: View {
+    let items: [GalleryItem]
+    @Binding var current: String?
 
     var body: some View {
-        switch item.kind {
-        case .video: VideoPage(item: item, active: active, toggleChrome: toggleChrome)
-        case .livePhoto: LivePhotoPage(item: item, toggleChrome: toggleChrome)
-        case .photo: PhotoPage(item: item, toggleChrome: toggleChrome, zoomChanged: zoomChanged)
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 3) {
+                    ForEach(items) { item in
+                        let selected = item.id == current
+                        Button { withAnimation(.easeInOut(duration: 0.2)) { current = item.id } } label: {
+                            Thumbnail(item: item, pixelSize: 60)
+                                .frame(width: selected ? 44 : 30, height: 46)
+                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(Color.white, lineWidth: selected ? 2 : 0))
+                                .padding(.horizontal, selected ? 4 : 0)
+                        }
+                        .buttonStyle(.plain)
+                        .id(item.id)
+                    }
+                }
+                .padding(.horizontal, 200)
+            }
+            .frame(height: 50)
+            .onAppear { proxy.scrollTo(current, anchor: .center) }
+            .onChange(of: current) { _, value in withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(value, anchor: .center) } }
         }
+        .mask(LinearGradient(colors: [.clear, .black, .black, .clear], startPoint: .leading, endPoint: .trailing))
     }
 }
 
-// MARK: Photos
+// MARK: Share
 
-struct PhotoPage: View {
+struct ShareFile: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+/// The system share sheet: WhatsApp, AirDrop, Mensajes…
+struct ActivitySheet: UIViewControllerRepresentable {
+    let items: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+}
+
+// MARK: Information
+
+/// Ⓘ: when and where the photo was taken, with what, the file and its albums.
+struct InfoSheet: View {
     @EnvironmentObject var store: GalleryStore
-    @Environment(\.displayScale) private var displayScale
     let item: GalleryItem
-    var toggleChrome: () -> Void
-    var zoomChanged: (Bool) -> Void
-    @State private var image: UIImage?
-    @State private var failure: String?
-    @State private var loadingFull = false
+    @State private var info: PhotoInfo?
+    @State private var place: String?
 
     var body: some View {
-        GeometryReader { geo in
-            ZStack {
-                if let image {
-                    ZoomableImage(image: image, toggleChrome: toggleChrome, zoomChanged: zoomChanged)
-                } else if failure == nil {
-                    ProgressView().tint(.white)
-                }
-                if let failure {
-                    VStack(spacing: 10) {
-                        Image(systemName: "exclamationmark.triangle").font(.title)
-                        Text(failure).font(.subheadline).multilineTextAlignment(.center)
+        NavigationStack {
+            List {
+                Section {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(Timeline.format(item.date, "EEEE d 'de' MMMM 'de' y")).font(.headline)
+                        Text(Timeline.format(item.date, "HH:mm") + (item.duration.map { " · " + durationText($0) } ?? ""))
+                            .font(.subheadline).foregroundStyle(.secondary)
                     }
-                    .foregroundStyle(.white.opacity(0.85)).padding(30)
+                    .padding(.vertical, 4)
                 }
-                if loadingFull && image != nil {
-                    ProgressView().tint(.white).padding(10).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing).padding(.bottom, 30)
-                }
-            }
-            .frame(width: geo.size.width, height: geo.size.height)
-            .task(id: item.id) { await load(longSide: max(geo.size.width, geo.size.height)) }
-        }
-    }
-
-    private func load(longSide: CGFloat) async {
-        switch item.source {
-        case .phone(let id):
-            let pixels = longSide * displayScale * 1.5
-            for await next in PhoneLibrary.shared.images(id, pixels: CGSize(width: pixels, height: pixels), fill: false) { image = next }
-            if image == nil { failure = "No se pudo abrir la foto." }
-        case .nas(let url):
-            if image == nil { image = NASImageLoader.shared.cached(url) }
-            guard let account = store.account else { failure = "Conecta el NAS para ver esta foto."; return }
-            loadingFull = true
-            defer { loadingFull = false }
-            do {
-                let full = try await NASImageLoader.shared.image(item, account: account, maxPixels: min(longSide * displayScale * 2, 4096))
-                if !Task.isCancelled { image = full }
-            } catch {
-                if !Task.isCancelled && image == nil { failure = error.localizedDescription }
-            }
-        }
-    }
-}
-
-/// Pinch or double tap to zoom; drag to move around while zoomed.
-struct ZoomableImage: View {
-    let image: UIImage
-    var toggleChrome: () -> Void
-    var zoomChanged: (Bool) -> Void
-    @State private var scale: CGFloat = 1
-    @State private var baseScale: CGFloat = 1
-    @State private var offset: CGSize = .zero
-    @State private var baseOffset: CGSize = .zero
-
-    var body: some View {
-        Image(uiImage: image)
-            .resizable()
-            .scaledToFit()
-            .scaleEffect(scale)
-            .offset(offset)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .contentShape(Rectangle())
-            .gesture(
-                MagnifyGesture()
-                    .onChanged { value in scale = min(max(baseScale * value.magnification, 1), 6) }
-                    .onEnded { _ in
-                        if scale < 1.05 { reset() } else { baseScale = scale; zoomChanged(true) }
+                if let info {
+                    if info.camera != nil || info.lens != nil || info.exposure != nil {
+                        Section("Cámara") {
+                            if let camera = info.camera { Label(camera, systemImage: "camera") }
+                            if let lens = info.lens { Label(lens, systemImage: "camera.aperture") }
+                            if let exposure = info.exposure { Label(exposure, systemImage: "dial.medium") }
+                        }
                     }
-            )
-            .simultaneousGesture(
-                DragGesture()
-                    .onChanged { value in
-                        offset = CGSize(width: baseOffset.width + value.translation.width, height: baseOffset.height + value.translation.height)
+                    Section("Archivo") {
+                        if let name = info.fileName { LabeledContent("Nombre", value: name) }
+                        if let format = info.format, !format.isEmpty { LabeledContent("Formato", value: format) }
+                        if let resolution = info.resolution { LabeledContent("Resolución", value: resolution) }
+                        if let bytes = info.bytes { LabeledContent("Tamaño", value: ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) }
                     }
-                    .onEnded { _ in baseOffset = offset },
-                including: scale > 1 ? .all : .none
-            )
-            .onTapGesture(count: 2) {
-                if scale > 1 { withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { reset() } }
-                else {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { scale = 2.5; baseScale = 2.5 }
-                    zoomChanged(true)
-                }
-            }
-            .onTapGesture { toggleChrome() }
-            .onChange(of: image) { reset() }
-    }
-
-    private func reset() {
-        scale = 1; baseScale = 1; offset = .zero; baseOffset = .zero
-        zoomChanged(false)
-    }
-}
-
-// MARK: Live Photos
-
-struct LivePhotoPage: View {
-    @Environment(\.displayScale) private var displayScale
-    let item: GalleryItem
-    var toggleChrome: () -> Void
-    @State private var photo: PHLivePhoto?
-
-    var body: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .topLeading) {
-                if let photo {
-                    LivePhotoView(photo: photo).onTapGesture { toggleChrome() }
+                    if let location = info.location {
+                        Section("Ubicación") {
+                            Map(initialPosition: .region(MKCoordinateRegion(center: location, latitudinalMeters: 1500, longitudinalMeters: 1500))) {
+                                Marker(place ?? "", coordinate: location)
+                            }
+                            .frame(height: 180)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .listRowInsets(EdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8))
+                            if let place { Label(place, systemImage: "mappin.and.ellipse") }
+                        }
+                    }
                 } else {
-                    ProgressView().tint(.white).frame(maxWidth: .infinity, maxHeight: .infinity)
+                    Section { HStack { Spacer(); ProgressView(); Spacer() } }
                 }
-                Label("LIVE", systemImage: "livephoto")
-                    .font(.caption2.weight(.bold)).foregroundStyle(Palette.ink)
-                    .padding(.horizontal, 10).frame(height: 26)
-                    .liquidCapsule()
-                    .padding(.leading, 16).padding(.top, geo.safeAreaInsets.top + 64)
-                    .allowsHitTesting(false)
-            }
-            .task(id: item.id) {
-                guard let id = item.phoneID else { return }
-                let pixels = max(geo.size.width, geo.size.height) * displayScale
-                for await next in PhoneLibrary.shared.livePhoto(id, pixels: CGSize(width: pixels, height: pixels)) { photo = next }
-            }
-        }
-    }
-}
-
-struct LivePhotoView: UIViewRepresentable {
-    let photo: PHLivePhoto
-    func makeUIView(context: Context) -> PHLivePhotoView {
-        let view = PHLivePhotoView()
-        view.contentMode = .scaleAspectFit
-        return view
-    }
-    func updateUIView(_ view: PHLivePhotoView, context: Context) {
-        if view.livePhoto !== photo { view.livePhoto = photo }
-    }
-}
-
-// MARK: Videos
-
-/// A video: iPhone videos through PhotoKit; NAS videos streamed from the NAS while they
-/// play (MOV and MP4 in the system player, MKV, AVI and the rest in VLC).
-struct VideoPage: View {
-    @EnvironmentObject var store: GalleryStore
-    let item: GalleryItem
-    let active: Bool
-    var toggleChrome: () -> Void
-    @State private var player: AVPlayer?
-    @State private var vlcURL: URL?
-    @State private var failure: String?
-    @State private var started = false
-
-    /// Formats the system player opens; the rest go to VLC.
-    private var native: Bool { !item.isNAS || MediaFormat.playable.contains(item.fileExtension) }
-
-    var body: some View {
-        ZStack {
-            if let player {
-                VideoPlayer(player: player)
-            } else if let vlcURL {
-                VLCInlinePlayer(url: vlcURL, active: active)
-            } else {
-                Thumbnail(item: item, pixelSize: 700)
-                    .aspectRatio(item.aspect > 0 ? item.aspect : 16 / 9, contentMode: .fit)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .onTapGesture { toggleChrome() }
-                overlay
-            }
-        }
-        .onChange(of: active) { _, isActive in
-            if isActive { if player != nil { player?.play() } else if !item.isNAS { Task { await prepare() } } } else { pause() }
-        }
-        .task { if active && !item.isNAS { await prepare() } }
-        .onDisappear { stop() }
-    }
-
-    @ViewBuilder private var overlay: some View {
-        if let failure {
-            VStack(spacing: 10) {
-                Image(systemName: "exclamationmark.triangle").font(.title)
-                Text(failure).font(.subheadline).multilineTextAlignment(.center)
-            }
-            .foregroundStyle(.white)
-            .padding(24)
-            .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-            .padding(30)
-        } else if item.isNAS {
-            Button { Task { await startNAS() } } label: {
-                Group {
-                    if started { ProgressView().tint(Palette.accent) }
-                    else { Image(systemName: "play.fill").font(.system(size: 30)).foregroundStyle(Palette.accent) }
+                Section("Dónde está") {
+                    if item.isNAS {
+                        Label(store.nasLabel + " · " + ((item.folder?.isEmpty ?? true) ? "carpeta principal" : item.folder!), systemImage: "server.rack")
+                    } else {
+                        Label("Este iPhone", systemImage: "iphone")
+                    }
+                    let albums = store.albums.filter { $0.items.contains(item.id) }
+                    if !albums.isEmpty { Label(albums.map(\.name).joined(separator: ", "), systemImage: "rectangle.stack") }
+                    if store.isFavorite(item) { Label("Favoritos", systemImage: "heart.fill") }
                 }
-                .frame(width: 84, height: 84).contentShape(Circle())
-                .liquidCircle()
             }
-            .buttonStyle(PressStyle())
-            .disabled(started)
-            .accessibilityLabel("Reproducir")
-        } else {
-            ProgressView().tint(.white)
+            .navigationTitle("Información")
+            .navigationBarTitleDisplayMode(.inline)
         }
-    }
-
-    private func prepare() async {
-        guard player == nil, case .phone(let id) = item.source else { return }
-        guard let playerItem = await PhoneLibrary.shared.playerItem(id) else { failure = "No se pudo abrir el video."; return }
-        guard active else { return }
-        let player = AVPlayer(playerItem: playerItem)
-        self.player = player
-        player.play()
-    }
-
-    /// Starts at once: the local stream server fetches the parts from the NAS as they play.
-    private func startNAS() async {
-        guard let url = item.nasURL, let account = store.account else { failure = "Conecta el NAS para ver este video."; return }
-        started = true
-        defer { started = false }
-        let file = StreamFile(url: url, bytes: item.bytes)
-        if let local = BlockCache.downloaded(file) { play(local); return }
-        do {
-            let stream = try await StreamServer.shared.url(for: file, account: account)
-            if native { play(stream) } else { vlcURL = stream }
-        } catch {
-            failure = error.localizedDescription
+        .presentationDetents([.medium, .large])
+        .task {
+            let loaded = await PhotoInfo.load(item, account: store.account)
+            info = loaded
+            if let location = loaded.location { place = await PhotoInfo.placeName(location) }
         }
-    }
-
-    private func play(_ url: URL) {
-        let player = AVPlayer(url: url)
-        self.player = player
-        player.play()
-    }
-
-    private func pause() { player?.pause() }
-
-    private func stop() {
-        player?.pause()
-        player = nil
-        vlcURL = nil
     }
 }
