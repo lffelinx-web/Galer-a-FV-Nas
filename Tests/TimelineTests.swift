@@ -1,4 +1,6 @@
 import XCTest
+import UIKit
+import ImageIO
 @testable import LFAZGaleria
 
 final class TimelineTests: XCTestCase {
@@ -122,5 +124,81 @@ final class WebDAVTests: XCTestCase {
         let entries = try DAVParser.parse(data, folder: folder)
         XCTAssertEqual(entries.count, 12_000)
         XCTAssertEqual(entries.first?.kind, .photo)
+    }
+}
+
+final class WallLayoutTests: XCTestCase {
+    private func items(_ count: Int) -> [GalleryItem] {
+        (0..<count).map { index in
+            GalleryItem(id: "i\(index)", source: .phone("i\(index)"), date: Date(timeIntervalSince1970: 1_700_000_000 - Double(index) * 20_000),
+                        kind: .photo, aspect: [0.75, 1, 1.5][index % 3], duration: nil, name: "", bytes: nil, folder: nil)
+        }
+    }
+
+    func testEveryPhotoIsPlacedOnceInEveryScale() {
+        let all = items(500)
+        for scale in [TimeScale.days, .months] {
+            let layout = WallLayout.build(all, scale: scale, width: 393)
+            var ids: [String] = []
+            for element in layout.elements { if case .tile(let item, _) = element.kind { ids.append(item.id) } }
+            XCTAssertEqual(ids.sorted(), all.map(\.id).sorted(), "\(scale)")
+            XCTAssertTrue(layout.elements.allSatisfy { $0.frame.maxX <= 393.5 && $0.frame.minX >= 0 })
+        }
+        XCTAssertFalse(WallLayout.build(all, scale: .years, width: 393).elements.isEmpty)
+    }
+
+    func testVisibleElementsMatchABruteForceSearch() {
+        let layout = WallLayout.build(items(800), scale: .days, width: 390)
+        for top in stride(from: CGFloat(0), to: layout.height, by: 731) {
+            let rect = CGRect(x: 0, y: top, width: 390, height: 844)
+            let expected = layout.elements.indices.filter { layout.elements[$0].frame.intersects(rect) }
+            XCTAssertEqual(layout.indices(in: rect).sorted(), expected)
+        }
+    }
+
+    func testFocusOpensAtTheSameDate() {
+        let all = items(600)
+        let target = all[400].date
+        let layout = WallLayout.build(all, scale: .months, width: 390, focus: target)
+        let section = Timeline.section(containing: target, in: layout.sections, scale: .months)
+        XCTAssertNotNil(layout.initialY)
+        XCTAssertEqual(layout.initialY, section.flatMap { layout.sectionTop[$0.id] })
+    }
+}
+
+final class CaptureReaderTests: XCTestCase {
+    func testExifDateUsesTheOffset() {
+        let date = CaptureReader.exifDate("2023:05:14 10:15:30", offset: "-06:00")
+        XCTAssertEqual(date, ISO8601DateFormatter().date(from: "2023-05-14T16:15:30Z"))
+        XCTAssertNil(CaptureReader.exifDate("0000:00:00 00:00:00", offset: nil))
+    }
+
+    func testReadsJPEGMetadata() throws {
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 40, height: 30))
+        let image = renderer.image { context in UIColor.blue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 40, height: 30)) }
+        let data = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil))
+        let exif: [CFString: Any] = [kCGImagePropertyExifDateTimeOriginal: "2021:03:09 18:20:11", kCGImagePropertyExifOffsetTimeOriginal: "+00:00"]
+        CGImageDestinationAddImage(destination, try XCTUnwrap(image.cgImage), [kCGImagePropertyExifDictionary: exif] as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        let info = try XCTUnwrap(CaptureReader.image(data as Data))
+        XCTAssertEqual(info.date, ISO8601DateFormatter().date(from: "2021-03-09T18:20:11Z"))
+        XCTAssertEqual(info.aspect ?? 0, 40.0 / 30.0, accuracy: 0.01)
+    }
+
+    func testReadsMovieHeader() {
+        func be(_ value: UInt64, _ count: Int) -> [UInt8] { (0..<count).map { UInt8((value >> (8 * UInt64(count - 1 - $0))) & 0xFF) } }
+        // 2023-05-14T16:15:30Z in seconds since 1904.
+        let created: UInt64 = 1_684_080_930 + 2_082_844_800
+        var mvhd: [UInt8] = Array("mvhd".utf8) + [0, 0, 0, 0] + be(created, 4) + be(created, 4) + be(600, 4) + be(600 * 42, 4)
+        mvhd += [UInt8](repeating: 0, count: 80)
+        var tkhd: [UInt8] = Array("tkhd".utf8) + [0, 0, 0, 0] + [UInt8](repeating: 0, count: 36)
+        // A portrait iPhone video: a 90° matrix (a = 0) on a 1920 × 1080 track.
+        tkhd += be(0, 4) + be(0x10000, 4) + [UInt8](repeating: 0, count: 28)
+        tkhd += be(1920 << 16, 4) + be(1080 << 16, 4)
+        let info = CaptureReader.movie(Data([0, 0, 0, 0, 0x6D, 0x6F, 0x6F, 0x76] + mvhd + tkhd))
+        XCTAssertEqual(info?.date, ISO8601DateFormatter().date(from: "2023-05-14T16:15:30Z"))
+        XCTAssertEqual(info?.duration ?? 0, 42, accuracy: 0.001)
+        XCTAssertEqual(info?.aspect ?? 0, 1080.0 / 1920.0, accuracy: 0.001)
     }
 }

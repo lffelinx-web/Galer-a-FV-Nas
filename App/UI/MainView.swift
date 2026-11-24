@@ -74,12 +74,12 @@ struct MainView: View {
         GlassGroup(spacing: 16) {
             HStack(spacing: 10) {
                 if showCompact {
-                    GlassCircleButton(systemImage: "house.fill", label: "Inicio", id: "home", namespace: glass) { goHome() }
+                    GlassCircleButton(systemImage: "house.fill", label: "Inicio", id: "home", namespace: glass, size: 56) { goHome() }
                     Spacer(minLength: 0)
                     ScaleSwitcher(scale: $scale, namespace: lens)
                         .glassPiece(Capsule(), id: "bar", in: glass)
                     Spacer(minLength: 0)
-                    GlassCircleButton(systemImage: "gearshape.fill", label: "Configuración", id: "gear", namespace: glass) { select(.settings) }
+                    GlassCircleButton(systemImage: "gearshape.fill", label: "Configuración", id: "gear", namespace: glass, size: 56) { select(.settings) }
                 } else {
                     FullTabBar(tab: tab, namespace: lens, select: select)
                         .glassPiece(Capsule(), id: "bar", in: glass)
@@ -151,8 +151,10 @@ struct ScaleSwitcher: View {
                 } label: {
                     Text(item.title)
                         .font(.system(size: 15, weight: selected ? .semibold : .medium))
+                        .lineLimit(1)
+                        .fixedSize()
                         .foregroundStyle(selected ? Color.white : Palette.ink)
-                        .padding(.horizontal, 16).frame(height: 48)
+                        .padding(.horizontal, 13).frame(height: 46)
                         .selectionLens(selected, in: namespace)
                         .contentShape(Capsule())
                 }
@@ -161,7 +163,8 @@ struct ScaleSwitcher: View {
             }
         }
         .padding(5)
-        .frame(height: 58)
+        .frame(height: 56)
+        .fixedSize(horizontal: true, vertical: false)
         .sensoryFeedback(.selection, trigger: scale)
     }
 }

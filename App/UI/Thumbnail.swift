@@ -32,6 +32,8 @@ struct Thumbnail: View {
                 }
             }
             .clipped()
+            // Touches stay inside the tile even when the cropped photo is larger.
+            .contentShape(Rectangle())
             .task(id: item.id) { await load() }
             // Tiles that scrolled away give their image back; the caches bring it back fast.
             .onDisappear { image = nil; shown = nil }

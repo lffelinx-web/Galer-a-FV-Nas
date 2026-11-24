@@ -48,6 +48,8 @@ final class GalleryStore: ObservableObject {
     @Published private(set) var lastRoute: String?
     @Published private(set) var scanning = false
     @Published private(set) var scanStatus: String?
+    /// Progress while the capture dates of NAS files are read.
+    @Published private(set) var datesStatus: String?
     @Published private(set) var lastScan: Date?
     @Published private(set) var connecting = false
     @Published private(set) var albums: [AppAlbum] = []
@@ -66,10 +68,13 @@ final class GalleryStore: ObservableObject {
     private var mergeTask: Task<Void, Never>?
     private var phoneReload: Task<Void, Never>?
     private var learnedAspects: [String: Double] = [:]
+    private var captured: [String: CaptureInfo] = [:]
+    private var datesTask: Task<Void, Never>?
     private var lastStatusUpdate = Date.distantPast
 
     private var indexName: String { "nas-" + String(Files.key(account?.scope ?? "none").prefix(16)) + ".json" }
     private var aspectsName: String { "aspects-" + String(Files.key(account?.scope ?? "none").prefix(16)) + ".json" }
+    private var capturedName: String { "captured-" + String(Files.key(account?.scope ?? "none").prefix(16)) + ".json" }
     private let albumsName = "albums.json"
 
     init() {
@@ -105,7 +110,7 @@ final class GalleryStore: ObservableObject {
         loaded = true
         guard account != nil else { return }
         await checkConnection()
-        if nasItems.isEmpty && nasState == .connected { scan() }
+        if nasItems.isEmpty && nasState == .connected { scan() } else if nasState == .connected { readCaptureDates() }
     }
 
     /// Pull to refresh: the iPhone library and the NAS connection. A full NAS search is
@@ -160,7 +165,7 @@ final class GalleryStore: ObservableObject {
             guard response.status == 207 else { throw GalleryError.message("La dirección no corresponde a una carpeta WebDAV.") }
             try AccountKeychain.save(candidate)
             let changed = account?.scope != candidate.scope
-            if changed { scanTask?.cancel(); scanning = false }
+            if changed { scanTask?.cancel(); scanning = false; datesTask?.cancel(); datesTask = nil; datesStatus = nil }
             account = candidate
             lastRoute = response.route
             nasState = .connected
@@ -175,6 +180,7 @@ final class GalleryStore: ObservableObject {
     func disconnect() {
         do { try AccountKeychain.clear() } catch { self.error = error.localizedDescription; return }
         scanTask?.cancel(); scanning = false; scanStatus = nil
+        datesTask?.cancel(); datesTask = nil; datesStatus = nil; captured = [:]
         account = nil; nasItems = []; lastScan = nil; lastRoute = nil; nasState = .notConfigured
         merge()
     }
@@ -195,20 +201,25 @@ final class GalleryStore: ObservableObject {
 
     func scan() {
         guard let account, !scanning else { return }
+        datesTask?.cancel(); datesTask = nil; datesStatus = nil
         scanning = true; scanStatus = "Buscando fotos en el NAS…"
         let aspects = learnedAspects
+        let known = captured
         let name = indexName
         scanTask = Task {
             defer { scanning = false }
             do {
-                let found = try await NASScanner(account: account, learnedAspects: aspects).scan { folder, count in
+                let scanned = try await NASScanner(account: account, learnedAspects: aspects).scan { folder, count in
                     Task { @MainActor [weak self] in self?.showProgress(folder: folder, count: count) }
                 }
+                let found = await Task.detached(priority: .userInitiated) { Self.applying(known, to: scanned) }.value
                 guard self.account?.scope == account.scope else { return }
-                let scanned = Date()
-                nasItems = found; lastScan = scanned; nasState = .connected; scanStatus = nil
-                Task.detached(priority: .utility) { try? Files.save(NASIndex(items: found, scanned: scanned), name: name) }
+                let scannedAt = Date()
+                nasItems = found; lastScan = scannedAt; nasState = .connected; scanStatus = nil
+                Task.detached(priority: .utility) { try? Files.save(NASIndex(items: scanned, scanned: scannedAt), name: name) }
                 merge()
+                scanning = false
+                readCaptureDates()
             } catch {
                 scanStatus = nil
                 guard !Task.isCancelled, !(error is CancellationError) else { return }
@@ -227,18 +238,21 @@ final class GalleryStore: ObservableObject {
     }
 
     private func loadIndex() async {
-        let (aspectsFile, indexFile) = (aspectsName, indexName)
-        let (aspects, index) = await Task.detached(priority: .userInitiated) { () -> ([String: Double], NASIndex) in
+        let (aspectsFile, indexFile, capturedFile) = (aspectsName, indexName, capturedName)
+        let (aspects, captured, index) = await Task.detached(priority: .userInitiated) { () -> ([String: Double], [String: CaptureInfo], NASIndex) in
             let aspects = Files.load(aspectsFile, as: [String: Double].self) ?? [:]
+            let captured = Files.load(capturedFile, as: [String: CaptureInfo].self) ?? [:]
             var index = Files.load(indexFile, as: NASIndex.self) ?? NASIndex()
             if !aspects.isEmpty {
                 for position in index.items.indices {
                     if let aspect = aspects[index.items[position].id] { index.items[position].aspect = aspect }
                 }
             }
-            return (aspects, index)
+            index.items = Self.applying(captured, to: index.items)
+            return (aspects, captured, index)
         }.value
         learnedAspects = aspects
+        self.captured = captured
         nasItems = index.items
         lastScan = index.scanned
         merge()
@@ -253,6 +267,77 @@ final class GalleryStore: ObservableObject {
         learnedAspects.merge(new) { _, latest in latest }
         let (all, name) = (learnedAspects, aspectsName)
         Task.detached(priority: .utility) { try? Files.save(all, name: name) }
+    }
+
+    // MARK: Capture dates
+
+    /// Reads, in the background, when each NAS photo was really taken and reorders the
+    /// NAS by that date. Already read files are remembered, so it only runs once per file.
+    func readCaptureDates() {
+        guard let account, datesTask == nil, !scanning else { return }
+        let known = captured
+        let pending = nasItems.filter { known[$0.id] == nil }
+        guard !pending.isEmpty else { return }
+        let total = pending.count
+        datesStatus = "Ordenando por fecha de captura…"
+        datesTask = Task {
+            let transport = NASTransport(account)
+            var batch: [String: CaptureInfo] = [:]
+            var done = 0, failures = 0
+            var lastApply = Date()
+            var start = 0
+            while start < total, !Task.isCancelled {
+                let chunk = Array(pending[start..<min(start + 4, total)])
+                start += chunk.count
+                let results = await withTaskGroup(of: (String, CaptureInfo?).self) { group -> [(String, CaptureInfo?)] in
+                    for item in chunk { group.addTask { (item.id, await CaptureReader.read(item, transport: transport)) } }
+                    var out: [(String, CaptureInfo?)] = []
+                    for await result in group { out.append(result) }
+                    return out
+                }
+                for (id, info) in results {
+                    if let info { batch[id] = info; failures = 0 } else { failures += 1 }
+                }
+                done += chunk.count
+                // The NAS stopped answering: try again on the next launch.
+                if failures >= 12 { break }
+                if done % 200 == 0 || done == total {
+                    datesStatus = "Ordenando por fecha de captura · \(done.formatted()) de \(total.formatted())"
+                }
+                // Reorder now and then, not on every file, so the wall does not keep moving.
+                if Date().timeIntervalSince(lastApply) > 180 {
+                    await applyCaptured(batch); batch = [:]; lastApply = Date()
+                }
+            }
+            guard !Task.isCancelled else { return }
+            await applyCaptured(batch)
+            datesStatus = nil
+            datesTask = nil
+        }
+    }
+
+    private func applyCaptured(_ new: [String: CaptureInfo]) async {
+        guard !new.isEmpty, account != nil else { return }
+        captured.merge(new) { _, latest in latest }
+        let (all, items, name) = (captured, nasItems, capturedName)
+        let sorted = await Task.detached(priority: .userInitiated) { () -> [GalleryItem] in
+            try? Files.save(all, name: name)
+            return Self.applying(all, to: items)
+        }.value
+        nasItems = sorted
+        merge()
+    }
+
+    nonisolated static func applying(_ captured: [String: CaptureInfo], to items: [GalleryItem]) -> [GalleryItem] {
+        guard !captured.isEmpty else { return items }
+        var result = items
+        for index in result.indices {
+            guard let info = captured[result[index].id] else { continue }
+            if let date = info.date { result[index].date = date }
+            if let aspect = info.aspect, aspect.isFinite, aspect > 0 { result[index].aspect = aspect }
+            if let duration = info.duration { result[index].duration = duration }
+        }
+        return result.sorted { $0.date == $1.date ? $0.id < $1.id : $0.date > $1.date }
     }
 
     // MARK: Timeline
@@ -281,8 +366,12 @@ final class GalleryStore: ObservableObject {
         }
     }
 
+    /// Opens the viewer on the photos around the tapped one, so it opens instantly even in
+    /// a library of tens of thousands.
     func open(_ item: GalleryItem, in list: [GalleryItem]) {
-        viewer = ViewerContext(items: list, start: item.id)
+        let position = list.firstIndex { $0.id == item.id } ?? 0
+        let window = list.isEmpty ? [item] : Array(list[max(0, position - 400)..<min(list.count, position + 400)])
+        viewer = ViewerContext(items: window, start: item.id)
     }
 
     // MARK: Albums

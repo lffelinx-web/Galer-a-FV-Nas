@@ -1,78 +1,5 @@
 import SwiftUI
-
-enum LibraryRowKind {
-    case header(TimelineSection)
-    case mosaic(MosaicBlock, [GalleryItem])
-    case squares([GalleryItem])
-    case year(TimelineSection)
-}
-
-struct LibraryRow: Identifiable {
-    let id: String
-    let date: Date
-    let kind: LibraryRowKind
-}
-
-enum LibraryRows {
-    static let spacing: CGFloat = 4
-    static let columns = 4
-
-    static func build(_ sections: [TimelineSection], scale: TimeScale, width: CGFloat) -> [LibraryRow] {
-        guard width > 0 else { return [] }
-        var rows: [LibraryRow] = []
-        for section in sections {
-            switch scale {
-            case .days:
-                rows.append(LibraryRow(id: section.id, date: section.date, kind: .header(section)))
-                let blocks = Mosaic.layout(aspects: section.items.map(\.aspect), width: width, spacing: spacing)
-                for (number, block) in blocks.enumerated() {
-                    rows.append(LibraryRow(id: section.id + "#\(number)", date: section.date, kind: .mosaic(block, block.tiles.map { section.items[$0.index] })))
-                }
-            case .months:
-                rows.append(LibraryRow(id: section.id, date: section.date, kind: .header(section)))
-                var start = 0
-                while start < section.items.count {
-                    let end = min(start + columns, section.items.count)
-                    rows.append(LibraryRow(id: section.id + "#\(start)", date: section.date, kind: .squares(Array(section.items[start..<end]))))
-                    start = end
-                }
-            case .years:
-                rows.append(LibraryRow(id: section.id, date: section.date, kind: .year(section)))
-            }
-        }
-        return rows
-    }
-}
-
-/// Remembers which sections are on screen without redrawing the view, so switching
-/// between Días, Meses and Años keeps your place.
-final class FocusTracker {
-    var visible: [String: Date] = [:]
-    var requested: Date?
-    var focus: Date? { requested ?? visible.values.max() }
-}
-
-private struct OffsetKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
-/// How far the content is scrolled from the top. iOS 18 and later report it directly;
-/// earlier versions read the position of a marker at the top of the content.
-private struct ScrollDistance: ViewModifier {
-    var action: (CGFloat) -> Void
-    func body(content: Content) -> some View {
-        if #available(iOS 18, *) {
-            content.onScrollGeometryChange(for: CGFloat.self) { geometry in
-                geometry.contentOffset.y + geometry.contentInsets.top
-            } action: { _, distance in
-                action(distance)
-            }
-        } else {
-            content.onPreferenceChange(OffsetKey.self) { action(-$0) }
-        }
-    }
-}
+import UIKit
 
 private struct WallKey: Equatable {
     let revision: Int
@@ -80,8 +7,19 @@ private struct WallKey: Equatable {
     let width: CGFloat
 }
 
+/// Scroll position shared with the header, so only the header redraws while scrolling.
+final class WallScroll: ObservableObject {
+    @Published var distance: CGFloat = 0
+}
+
+private struct HeaderHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
 /// The photo wall shared by Fototeca and NAS: a mosaic by day, a grid by month or a card
-/// per year. The layout of tens of thousands of photos is built off the main thread.
+/// per year. The layout is measured off the main thread and drawn by a collection view
+/// that reuses its cells, so it stays smooth with tens of thousands of photos.
 struct PhotoWall<Header: View, Empty: View>: View {
     @EnvironmentObject var store: GalleryStore
     var items: [GalleryItem]
@@ -93,149 +31,263 @@ struct PhotoWall<Header: View, Empty: View>: View {
     @ViewBuilder var header: () -> Header
     @ViewBuilder var empty: () -> Empty
 
-    @State private var sections: [TimelineSection] = []
-    @State private var rows: [LibraryRow] = []
-    @State private var width: CGFloat = 0
-    @State private var tracker = FocusTracker()
-    @State private var pendingJump: Date?
-    @State private var building = true
+    @State private var layout = WallLayout()
     @State private var layoutID = 0
+    @State private var building = true
+    @State private var headerHeight: CGFloat = 0
+    @State private var focus: Date?
+    // Held without observing: only the header follows the scroll.
+    @State private var scroll = WallScroll()
+    @State private var tracker = WallTracker()
 
     var body: some View {
         GeometryReader { geo in
-            ScrollViewReader { proxy in
+            if items.isEmpty {
                 ScrollView {
-                    VStack(spacing: 0) {
-                        Color.clear.frame(height: 0).id("top")
-                            .background(GeometryReader { marker in
-                                Color.clear.preference(key: OffsetKey.self, value: marker.frame(in: .named("wall")).minY)
-                            })
-                        header()
-                        if items.isEmpty { empty() }
-                        else if rows.isEmpty && building { ProgressView().padding(.top, 80) }
-                        else { wall }
+                    VStack(spacing: 0) { header(); empty() }
+                }
+                .scrollIndicators(.hidden)
+                .refreshable { await refresh() }
+            } else {
+                ZStack(alignment: .top) {
+                    CollectionWall(layout: layout, layoutID: layoutID, topInset: headerHeight, topRequest: topRequest,
+                                   tracker: tracker,
+                                   onScroll: { distance in
+                                       scroll.distance = distance
+                                       onScroll(distance)
+                                   },
+                                   onSelect: select,
+                                   refresh: refresh)
+                        .ignoresSafeArea()
+                    WallHeader(scroll: scroll) { header() }
+                        .background(GeometryReader { proxy in Color.clear.preference(key: HeaderHeightKey.self, value: proxy.size.height) })
+                    if building && layout.elements.isEmpty {
+                        ProgressView().padding(.top, headerHeight + 80)
                     }
                 }
-                .coordinateSpace(name: "wall")
-                .scrollIndicators(.hidden)
-                .contentMargins(.bottom, 110, for: .scrollContent)
-                .modifier(ScrollDistance(action: onScroll))
-                .refreshable { await refresh() }
-                .onChange(of: topRequest) {
-                    tracker.requested = nil
-                    withAnimation(.smooth(duration: 0.45)) { proxy.scrollTo("top", anchor: .top) }
-                }
-                .onChange(of: scale) {
-                    // Keep the place: jump to the same dates once the new layout is ready.
-                    pendingJump = tracker.focus
-                    tracker.requested = nil
-                    tracker.visible = [:]
-                }
-                .task(id: WallKey(revision: revision, scale: scale, width: geo.size.width - LibraryRows.spacing * 2)) {
-                    await build(width: geo.size.width - LibraryRows.spacing * 2, proxy: proxy)
+                .onPreferenceChange(HeaderHeightKey.self) { headerHeight = $0 }
+                .task(id: WallKey(revision: revision, scale: scale, width: geo.size.width)) {
+                    await build(width: geo.size.width)
                 }
             }
         }
     }
 
-    private func build(width: CGFloat, proxy: ScrollViewProxy) async {
+    private func build(width: CGFloat) async {
         guard width > 0 else { return }
         building = true
+        // Keep the place: a new scale opens at the dates on screen, or at the one tapped.
+        let scaleChanged = scale != layout.scale && !layout.elements.isEmpty
+        let focus = self.focus ?? (scaleChanged && tracker.distance > 30 ? tracker.topDate : nil)
         let (items, scale) = (self.items, self.scale)
-        let result = await Task.detached(priority: .userInitiated) { () -> ([TimelineSection], [LibraryRow]) in
-            let sections = Timeline.sections(items, scale: scale)
-            return (sections, LibraryRows.build(sections, scale: scale, width: width))
+        let result = await Task.detached(priority: .userInitiated) {
+            WallLayout.build(items, scale: scale, width: width, focus: focus)
         }.value
         guard !Task.isCancelled else { return }
-        sections = result.0
-        rows = result.1
-        self.width = width
+        self.focus = nil
+        layout = result
         layoutID += 1
         building = false
-        if let target = pendingJump {
-            pendingJump = nil
-            if let section = Timeline.section(containing: target, in: sections, scale: scale) {
-                try? await Task.sleep(nanoseconds: 50_000_000)
-                proxy.scrollTo(section.id, anchor: .top)
-            }
-        }
     }
 
-    private var wall: some View {
-        WallRows(rows: rows, layoutID: layoutID, width: width, scale: scale, tracker: tracker,
-                 jump: { date, next in
-                     tracker.requested = date
-                     scale = next
-                 },
-                 open: { [items] item in store.open(item, in: items) })
-            .equatable()
-    }
-}
-
-/// The rows themselves. They only redraw when the layout changes, not on every status
-/// change of the store, which matters with tens of thousands of photos.
-private struct WallRows: View, Equatable {
-    let rows: [LibraryRow]
-    let layoutID: Int
-    let width: CGFloat
-    let scale: TimeScale
-    let tracker: FocusTracker
-    let jump: (Date, TimeScale) -> Void
-    let open: (GalleryItem) -> Void
-
-    static func == (lhs: WallRows, rhs: WallRows) -> Bool {
-        lhs.layoutID == rhs.layoutID && lhs.width == rhs.width && lhs.scale == rhs.scale
-    }
-
-    var body: some View {
-        LazyVStack(spacing: LibraryRows.spacing) {
-            ForEach(rows) { row in
-                rowView(row)
-                    .id(row.id)
-                    .onAppear { tracker.visible[row.id] = row.date }
-                    .onDisappear { tracker.visible[row.id] = nil }
-            }
-        }
-        .padding(.horizontal, LibraryRows.spacing)
-    }
-
-    @ViewBuilder private func rowView(_ row: LibraryRow) -> some View {
-        switch row.kind {
+    private func select(_ element: WallElement) {
+        switch element.kind {
+        case .tile(let item, _):
+            store.open(item, in: items)
         case .header(let section):
-            SectionHeader(section: section, scale: scale) {
-                guard scale == .months else { return }
-                jump(section.date, .days)
-            }
-        case .mosaic(let block, let tiles):
-            ZStack(alignment: .topLeading) {
-                ForEach(0..<min(tiles.count, block.tiles.count), id: \.self) { index in
-                    tileButton(tiles[index], size: block.tiles[index].frame.size, corner: 8)
-                        .offset(x: block.tiles[index].frame.minX, y: block.tiles[index].frame.minY)
-                }
-            }
-            .frame(width: width, height: block.height, alignment: .topLeading)
-        case .squares(let tiles):
-            let side = ((width - LibraryRows.spacing * CGFloat(LibraryRows.columns - 1)) / CGFloat(LibraryRows.columns)).rounded(.down)
-            HStack(spacing: LibraryRows.spacing) {
-                ForEach(tiles) { item in tileButton(item, size: CGSize(width: side, height: side), corner: 6) }
-                Spacer(minLength: 0)
-            }
-            .frame(width: width)
+            guard scale == .months else { return }
+            focus = section.date
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { scale = .days }
         case .year(let section):
-            YearCard(section: section) { jump(section.date, .months) }
-                .padding(.horizontal, 4).padding(.bottom, 10)
+            focus = section.date
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { scale = .months }
+        }
+    }
+}
+
+/// The header scrolls with the photos: it is drawn over the collection view and moved by
+/// the scroll distance.
+private struct WallHeader<Content: View>: View {
+    @ObservedObject var scroll: WallScroll
+    @ViewBuilder var content: () -> Content
+    var body: some View {
+        content()
+            .offset(y: -scroll.distance)
+            .opacity(scroll.distance > 200 ? 0 : 1)
+    }
+}
+
+/// What the collection view knows about the scroll, read without redrawing SwiftUI.
+final class WallTracker {
+    var distance: CGFloat = 0
+    var topDate: Date?
+}
+
+// MARK: Collection view
+
+struct CollectionWall: UIViewRepresentable {
+    var layout: WallLayout
+    var layoutID: Int
+    var topInset: CGFloat
+    var topRequest: Int
+    var tracker: WallTracker
+    var onScroll: (CGFloat) -> Void
+    var onSelect: (WallElement) -> Void
+    var refresh: () async -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> UICollectionView {
+        let view = UICollectionView(frame: .zero, collectionViewLayout: WallCollectionLayout())
+        view.backgroundColor = .clear
+        view.showsVerticalScrollIndicator = false
+        view.alwaysBounceVertical = true
+        view.contentInsetAdjustmentBehavior = .always
+        view.contentInset.bottom = 104
+        view.register(UICollectionViewCell.self, forCellWithReuseIdentifier: "cell")
+        view.dataSource = context.coordinator
+        view.delegate = context.coordinator
+        let control = UIRefreshControl()
+        control.addTarget(context.coordinator, action: #selector(Coordinator.refreshPulled(_:)), for: .valueChanged)
+        view.refreshControl = control
+        context.coordinator.lastTopRequest = topRequest
+        return view
+    }
+
+    func updateUIView(_ view: UICollectionView, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.parent = self
+        if view.contentInset.top != topInset {
+            let atTop = view.contentOffset.y <= -view.adjustedContentInset.top + 1
+            view.contentInset.top = topInset
+            if atTop { view.contentOffset.y = -view.adjustedContentInset.top }
+        }
+        if coordinator.layoutID != layoutID, let collectionLayout = view.collectionViewLayout as? WallCollectionLayout {
+            coordinator.layoutID = layoutID
+            collectionLayout.wall = layout
+            view.reloadData()
+            collectionLayout.invalidateLayout()
+            view.layoutIfNeeded()
+            if let y = layout.initialY {
+                let maxOffset = max(layout.height + view.adjustedContentInset.bottom - view.bounds.height, -view.adjustedContentInset.top)
+                view.setContentOffset(CGPoint(x: 0, y: min(y - view.adjustedContentInset.top, maxOffset)), animated: false)
+            }
+        }
+        if coordinator.lastTopRequest != topRequest {
+            coordinator.lastTopRequest = topRequest
+            view.setContentOffset(CGPoint(x: 0, y: -view.adjustedContentInset.top), animated: true)
         }
     }
 
-    private func tileButton(_ item: GalleryItem, size: CGSize, corner: CGFloat) -> some View {
-        Button { open(item) } label: {
-            Thumbnail(item: item, pixelSize: max(size.width, size.height))
-                .frame(width: size.width, height: size.height)
-                .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+    final class Coordinator: NSObject, UICollectionViewDataSource, UICollectionViewDelegate {
+        var parent: CollectionWall
+        var layoutID = -1
+        var lastTopRequest = 0
+
+        init(_ parent: CollectionWall) { self.parent = parent }
+
+        private var wall: WallLayout { parent.layout }
+
+        func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
+            (collectionView.collectionViewLayout as? WallCollectionLayout)?.wall.elements.count ?? 0
         }
-        .buttonStyle(PressStyle())
+
+        func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
+            let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "cell", for: indexPath)
+            guard let elements = (collectionView.collectionViewLayout as? WallCollectionLayout)?.wall.elements, indexPath.item < elements.count else { return cell }
+            let element = elements[indexPath.item]
+            switch element.kind {
+            case .tile(let item, let corner):
+                let side = max(element.frame.width, element.frame.height)
+                cell.contentConfiguration = UIHostingConfiguration {
+                    Thumbnail(item: item, pixelSize: side)
+                        .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+                }
+                .margins(.all, 0)
+            case .header(let section):
+                let scale = wall.scale
+                cell.contentConfiguration = UIHostingConfiguration { SectionHeader(section: section, scale: scale) }.margins(.all, 0)
+            case .year(let section):
+                cell.contentConfiguration = UIHostingConfiguration { YearCard(section: section) }.margins(.all, 0)
+            }
+            return cell
+        }
+
+        func collectionView(_ collectionView: UICollectionView, shouldHighlightItemAt indexPath: IndexPath) -> Bool {
+            guard let element = element(collectionView, indexPath) else { return false }
+            if case .header = element.kind { return wall.scale == .months }
+            return true
+        }
+
+        func collectionView(_ collectionView: UICollectionView, shouldSelectItemAt indexPath: IndexPath) -> Bool {
+            self.collectionView(collectionView, shouldHighlightItemAt: indexPath)
+        }
+
+        func collectionView(_ collectionView: UICollectionView, didHighlightItemAt indexPath: IndexPath) {
+            guard let cell = collectionView.cellForItem(at: indexPath) else { return }
+            UIView.animate(withDuration: 0.15) { cell.transform = CGAffineTransform(scaleX: 0.96, y: 0.96) }
+        }
+
+        func collectionView(_ collectionView: UICollectionView, didUnhighlightItemAt indexPath: IndexPath) {
+            guard let cell = collectionView.cellForItem(at: indexPath) else { return }
+            UIView.animate(withDuration: 0.25, delay: 0, usingSpringWithDamping: 0.6, initialSpringVelocity: 0, options: [.allowUserInteraction]) { cell.transform = .identity }
+        }
+
+        func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+            collectionView.deselectItem(at: indexPath, animated: false)
+            guard let element = element(collectionView, indexPath) else { return }
+            parent.onSelect(element)
+        }
+
+        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            let distance = scrollView.contentOffset.y + scrollView.adjustedContentInset.top
+            parent.tracker.distance = distance
+            parent.tracker.topDate = wall.date(at: distance + 20)
+            parent.onScroll(distance)
+        }
+
+        @objc func refreshPulled(_ control: UIRefreshControl) {
+            Task { @MainActor in
+                await parent.refresh()
+                control.endRefreshing()
+            }
+        }
+
+        private func element(_ collectionView: UICollectionView, _ indexPath: IndexPath) -> WallElement? {
+            guard let elements = (collectionView.collectionViewLayout as? WallCollectionLayout)?.wall.elements, indexPath.item < elements.count else { return nil }
+            return elements[indexPath.item]
+        }
     }
 }
+
+/// Places every cell at the frame measured in advance.
+final class WallCollectionLayout: UICollectionViewLayout {
+    var wall = WallLayout()
+
+    override var collectionViewContentSize: CGSize {
+        CGSize(width: collectionView?.bounds.width ?? 0, height: wall.height)
+    }
+
+    override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]? {
+        wall.indices(in: rect).map(attributes)
+    }
+
+    override func layoutAttributesForItem(at indexPath: IndexPath) -> UICollectionViewLayoutAttributes? {
+        indexPath.item < wall.elements.count ? attributes(indexPath.item) : nil
+    }
+
+    override func shouldInvalidateLayout(forBoundsChange newBounds: CGRect) -> Bool {
+        newBounds.width != collectionView?.bounds.width
+    }
+
+    private func attributes(_ index: Int) -> UICollectionViewLayoutAttributes {
+        let attributes = UICollectionViewLayoutAttributes(forCellWith: IndexPath(item: index, section: 0))
+        attributes.frame = wall.elements[index].frame
+        return attributes
+    }
+}
+
+// MARK: Fototeca
 
 /// Fototeca: the photos of the iPhone and the NAS together.
 struct LibraryView: View {
@@ -300,11 +352,11 @@ struct LibraryView: View {
     }
 }
 
-/// «Buscando fotos en el NAS…» while a search runs.
+/// «Buscando fotos en el NAS…» or «Ordenando por fecha de captura…» while it works.
 struct ScanBanner: View {
     @EnvironmentObject var store: GalleryStore
     var body: some View {
-        if let status = store.scanStatus {
+        if let status = store.scanStatus ?? store.datesStatus {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
                 Text(status).font(.footnote).foregroundStyle(Palette.secondary).lineLimit(1)
@@ -315,58 +367,53 @@ struct ScanBanner: View {
     }
 }
 
+/// «Hoy · 12 fotos» over a day, or «Mayo 2024 ›» over a month.
 struct SectionHeader: View {
     var section: TimelineSection
     var scale: TimeScale
-    var action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(section.title)
-                    .font(scale == .months ? .title3.weight(.bold) : .headline)
-                    .foregroundStyle(Palette.ink)
-                Text(mediaSummary(section.items)).font(.caption).foregroundStyle(Palette.secondary)
-                Spacer(minLength: 0)
-                if scale == .months { Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(Palette.secondary) }
-            }
-            .padding(.horizontal, 8)
-            .padding(.top, 14).padding(.bottom, 4)
-            .contentShape(Rectangle())
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(section.title)
+                .font(scale == .months ? .title3.weight(.bold) : .headline)
+                .foregroundStyle(Palette.ink)
+                .lineLimit(1)
+            Text(mediaSummary(section.items)).font(.caption).foregroundStyle(Palette.secondary).lineLimit(1)
+            Spacer(minLength: 0)
+            if scale == .months { Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(Palette.secondary) }
         }
-        .buttonStyle(.plain)
-        .disabled(scale != .months)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+        .padding(.bottom, 8)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(scale == .months ? .isButton : .isHeader)
     }
 }
 
 /// One year in Años: a large photo with the year over it.
 struct YearCard: View {
     var section: TimelineSection
-    var action: () -> Void
 
     private var cover: GalleryItem? {
         section.items.first { $0.favorite && !$0.isVideo } ?? section.items.first { !$0.isVideo } ?? section.items.first
     }
 
     var body: some View {
-        Button(action: action) {
-            GeometryReader { geo in
-                ZStack(alignment: .bottomLeading) {
-                    if let cover { Thumbnail(item: cover, pixelSize: geo.size.width).frame(width: geo.size.width, height: geo.size.height) }
-                    LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .center, endPoint: .bottom)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(section.title).font(.system(size: 40, weight: .bold))
-                        Text(mediaSummary(section.items)).font(.subheadline.weight(.medium)).opacity(0.9)
-                    }
-                    .foregroundStyle(.white)
-                    .padding(20)
+        GeometryReader { geo in
+            ZStack(alignment: .bottomLeading) {
+                if let cover { Thumbnail(item: cover, pixelSize: geo.size.width).frame(width: geo.size.width, height: geo.size.height) }
+                LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .center, endPoint: .bottom)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(section.title).font(.system(size: 40, weight: .bold))
+                    Text(mediaSummary(section.items)).font(.subheadline.weight(.medium)).opacity(0.9)
                 }
+                .foregroundStyle(.white)
+                .padding(20)
             }
-            .frame(height: 240)
-            .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-            .shadow(color: Palette.accent.opacity(0.12), radius: 14, y: 6)
         }
-        .buttonStyle(PressStyle())
+        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(section.title), \(mediaSummary(section.items))")
+        .accessibilityAddTraits(.isButton)
     }
 }
