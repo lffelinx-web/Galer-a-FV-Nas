@@ -68,6 +68,9 @@ actor NASImageLoader {
 
     nonisolated func cached(_ url: URL) -> UIImage? { memory.object(forKey: url.absoluteString as NSString) }
 
+    /// Thumbnails are being made for the screen right now.
+    func isBusy() -> Bool { !running.isEmpty }
+
     func takeAspects() -> [String: Double] {
         defer { aspects = [:] }
         return aspects

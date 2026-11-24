@@ -1,10 +1,10 @@
 import SwiftUI
-import AVKit
+import UIKit
 import MapKit
 
-/// Full-screen viewer: swipe sideways between photos, pinch or double tap to zoom, swipe
-/// down to close and up for the information. Below, the neighbours in a strip and the
-/// actions: Compartir, Favorito, Información and Más.
+/// Full-screen viewer. Sideways moves between photos; a vertical swipe never does: down
+/// closes and up lifts the photo to show its information below, as in Photos. At the
+/// bottom, the neighbours in a strip and the actions in three glass pieces.
 struct ViewerView: View {
     let context: ViewerContext
     @EnvironmentObject var store: GalleryStore
@@ -13,8 +13,10 @@ struct ViewerView: View {
     @State private var chrome = true
     @State private var zoomed = false
     @State private var dragY: CGFloat = 0
+    /// 0: photo only; 1: the photo lifted and the information below it.
+    @State private var info: CGFloat = 0
+    @State private var infoOpen = false
     @State private var albumItem: GalleryItem?
-    @State private var infoItem: GalleryItem?
     @State private var shareFile: ShareFile?
     @State private var working: String?
     @State private var toast: String?
@@ -40,36 +42,37 @@ struct ViewerView: View {
     private var currentItem: GalleryItem? { current.flatMap { positions[$0] }.map { context.items[$0] } }
 
     var body: some View {
-        ZStack {
-            Color.black.opacity((1 - min(dragY / 500, 0.7)) * progress).ignoresSafeArea()
-            ScrollView(.horizontal) {
-                LazyHStack(spacing: 0) {
-                    ForEach(context.items) { item in
-                        ViewerPage(item: item, active: item.id == current, chrome: chrome && settled, poster: poster(for: item),
-                                   toggleChrome: { withAnimation(.easeInOut(duration: 0.2)) { chrome.toggle() } },
-                                   zoomChanged: { zoomed = $0 })
-                            .containerRelativeFrame([.horizontal, .vertical])
-                            .id(item.id)
-                    }
+        GeometryReader { geo in
+            let panel = geo.size.height * 0.52
+            ZStack(alignment: .top) {
+                Color.black.opacity((1 - min(dragY / 500, 0.7)) * progress).ignoresSafeArea()
+                ViewerPager(items: context.items, current: $current, chrome: chrome && settled && info == 0, locked: zoomed || info > 0, zoomed: zoomed,
+                            store: store, poster: poster(for:),
+                            toggleChrome: { withAnimation(.easeInOut(duration: 0.2)) { chrome.toggle() } },
+                            zoomChanged: { zoomed = $0 },
+                            vertical: vertical)
+                    .ignoresSafeArea()
+                    // Lifted and a little smaller while the information is open.
+                    .scaleEffect(1 - 0.38 * info - min(dragY / 2500, 0.15), anchor: .top)
+                    .offset(y: dragY + info * geo.safeAreaInsets.top * 0.5)
+                    .opacity(settled ? 1 : 0)
+                    .simultaneousGesture(TapGesture().onEnded { if infoOpen { setInfo(false) } }, including: infoOpen ? .all : .none)
+                if !settled { zoomLayer }
+                if info > 0, let item = currentItem {
+                    InfoPanel(item: item)
+                        .frame(height: panel)
+                        .frame(maxHeight: .infinity, alignment: .bottom)
+                        .offset(y: (1 - info) * panel)
+                        .ignoresSafeArea(edges: .bottom)
+                        .transition(.identity)
                 }
-                .scrollTargetLayout()
             }
-            .scrollTargetBehavior(.paging)
-            .scrollPosition(id: $current)
-            .scrollIndicators(.hidden)
-            .scrollDisabled(zoomed)
-            .ignoresSafeArea()
-            .offset(y: dragY)
-            .scaleEffect(1 - min(dragY / 2500, 0.15))
-            .simultaneousGesture(verticalGesture, including: zoomed ? .none : .all)
-            .opacity(settled ? 1 : 0)
-            if !settled { zoomLayer }
         }
         .overlay(alignment: .top) {
             if chrome && settled { topBar.transition(.move(edge: .top).combined(with: .opacity)) }
         }
         .overlay(alignment: .bottom) {
-            if chrome && settled { bottomBar.transition(.move(edge: .bottom).combined(with: .opacity)) }
+            if chrome && settled && info == 0 { bottomBar.transition(.move(edge: .bottom).combined(with: .opacity)) }
         }
         .overlay {
             if let working {
@@ -97,7 +100,6 @@ struct ViewerView: View {
         }
         .statusBarHidden(!chrome)
         .sheet(item: $albumItem) { AddToAlbumSheet(itemID: $0.id).environmentObject(store) }
-        .sheet(item: $infoItem) { InfoSheet(item: $0).environmentObject(store) }
         .sheet(item: $shareFile) { ActivitySheet(items: [$0.url]).ignoresSafeArea() }
         .onChange(of: current) { zoomed = false }
     }
@@ -107,6 +109,36 @@ struct ViewerView: View {
     private func poster(for item: GalleryItem) -> UIImage? {
         if item.id == context.start, context.sourceIsWhole, let image = context.sourceImage { return image }
         return item.nasURL.flatMap { NASImageLoader.shared.cached($0) }
+    }
+
+    // MARK: Vertical swipes
+
+    /// Down closes (or hides the information); up shows the information.
+    private func vertical(_ drag: VerticalDrag) {
+        switch drag {
+        case .changed(let dy):
+            if infoOpen {
+                info = max(0, min(1, 1 - dy / 320))
+            } else if dy > 0 {
+                dragY = dy
+            } else {
+                info = max(0, min(1, -dy / 320))
+            }
+        case .ended(let dy, let velocity):
+            if infoOpen {
+                setInfo(!(dy > 90 || velocity > 600))
+            } else if dy > 0 {
+                if dy > 130 || (velocity > 800 && dy > 40) { close() }
+                else { withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { dragY = 0 } }
+            } else {
+                setInfo(-dy > 80 || velocity < -600)
+            }
+        }
+    }
+
+    private func setInfo(_ open: Bool) {
+        infoOpen = open
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) { info = open ? 1 : 0 }
     }
 
     // MARK: Zoom in and out
@@ -151,28 +183,13 @@ struct ViewerView: View {
 
     /// Back to the tile when the photo shown is the one that was tapped; otherwise a plain close.
     private func close() {
-        guard hasSource, current == context.start, !zoomed else { dismiss(); return }
+        guard hasSource, current == context.start, !zoomed, info == 0 else { dismiss(); return }
         settled = false
         withAnimation(.spring(response: 0.36, dampingFraction: 0.9)) { progress = 0; dragY = 0 } completion: {
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) { dismiss() }
         }
-    }
-
-    /// Down closes, up opens the information.
-    private var verticalGesture: some Gesture {
-        DragGesture(minimumDistance: 24)
-            .onChanged { value in
-                guard value.translation.height > 0, abs(value.translation.height) > abs(value.translation.width) * 1.4 else { return }
-                dragY = value.translation.height
-            }
-            .onEnded { value in
-                let vertical = abs(value.translation.height) > abs(value.translation.width) * 1.4
-                if vertical && value.translation.height < -60 { infoItem = currentItem; return }
-                if dragY > 130 || value.predictedEndTranslation.height > 400 && dragY > 40 { close() }
-                else { withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { dragY = 0 } }
-            }
     }
 
     // MARK: Bars
@@ -196,62 +213,90 @@ struct ViewerView: View {
                 .liquidCapsule()
             }
             Spacer(minLength: 0)
+            if store.nasState == .slow, currentItem?.isNAS == true {
+                Label("Cargando del NAS…", systemImage: "tortoise.fill")
+                    .labelStyle(.iconOnly)
+                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(Palette.warning)
+                    .frame(width: 46, height: 46)
+                    .liquidCircle()
+                    .accessibilityLabel("El NAS responde lento")
+            }
         }
         .padding(.horizontal, 14)
         .padding(.top, 4)
     }
 
     private var bottomBar: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 12) {
             Filmstrip(items: context.items, current: $current)
             if let item = currentItem { actions(item) }
         }
-        .padding(.bottom, 6)
+        .padding(.bottom, 4)
     }
 
-    /// Compartir · Favorito · Información · Más.
+    /// Compartir on the left, Favorito and Información together in the middle, Más on the
+    /// right: three glass pieces, like the scale bar of Fototeca.
     private func actions(_ item: GalleryItem) -> some View {
         let favorite = store.isFavorite(item)
         let hidden = store.isHidden(item)
-        return HStack(spacing: 0) {
-            barButton("square.and.arrow.up", "Compartir") { Task { await share(item) } }
-            barButton(favorite ? "heart.fill" : "heart", favorite ? "Quitar de favoritos" : "Favorito", tint: favorite ? .red : nil) {
-                store.toggleFavorite(item)
+        let size = MainView.barHeight
+        return GlassGroup(spacing: 14) {
+            HStack(spacing: 0) {
+                Button { Task { await share(item) } } label: {
+                    Image(systemName: "square.and.arrow.up").font(.system(size: 20, weight: .semibold)).foregroundStyle(Palette.ink)
+                        .offset(y: -1)
+                        .frame(width: size, height: size).contentShape(Circle())
+                        .liquidCircle()
+                }
+                .buttonStyle(PressStyle())
+                .accessibilityLabel("Compartir")
+                Spacer(minLength: 10)
+                HStack(spacing: 4) {
+                    Button { store.toggleFavorite(item) } label: {
+                        Label("Favorito", systemImage: favorite ? "heart.fill" : "heart")
+                            .foregroundStyle(favorite ? Color.red : Palette.ink)
+                            .symbolEffect(.bounce, value: favorite)
+                            .frame(width: 96, height: size - 10)
+                            .background { if favorite { Capsule().fill(Color.red.opacity(0.12)) } }
+                            .contentShape(Capsule())
+                    }
+                    .sensoryFeedback(.impact(weight: .light), trigger: favorite)
+                    .accessibilityLabel(favorite ? "Quitar de favoritos" : "Agregar a favoritos")
+                    Button { setInfo(true) } label: {
+                        Label("Info", systemImage: "info.circle")
+                            .foregroundStyle(Palette.ink)
+                            .frame(width: 84, height: size - 10)
+                            .contentShape(Capsule())
+                    }
+                    .accessibilityLabel("Información")
+                }
+                .labelStyle(BarLabelStyle())
+                .buttonStyle(PressStyle())
+                .padding(5)
+                .liquidCapsule()
+                Spacer(minLength: 10)
+                Menu {
+                    Button { albumItem = item } label: { Label("Agregar a álbum", systemImage: "rectangle.stack.badge.plus") }
+                    if item.isNAS {
+                        Button { Task { await saveToPhone(item) } } label: { Label("Guardar en el iPhone", systemImage: "square.and.arrow.down") }
+                    }
+                    if !item.isVideo {
+                        Button { Task { await copy(item) } } label: { Label("Copiar", systemImage: "doc.on.doc") }
+                    }
+                    Button { showDay(item) } label: { Label("Ver en el día", systemImage: "calendar") }
+                    Divider()
+                    Button { store.setHidden(item, !hidden) } label: {
+                        Label(hidden ? "Mostrar en Fototeca" : "Ocultar", systemImage: hidden ? "eye" : "eye.slash")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis").font(.system(size: 20, weight: .bold)).foregroundStyle(Palette.ink)
+                        .frame(width: size, height: size).contentShape(Circle())
+                        .liquidCircle()
+                }
+                .accessibilityLabel("Más")
             }
-            .sensoryFeedback(.impact(weight: .light), trigger: favorite)
-            barButton("info.circle", "Información") { infoItem = item }
-            Menu {
-                Button { albumItem = item } label: { Label("Agregar a álbum", systemImage: "rectangle.stack.badge.plus") }
-                if item.isNAS {
-                    Button { Task { await saveToPhone(item) } } label: { Label("Guardar en el iPhone", systemImage: "square.and.arrow.down") }
-                }
-                if !item.isVideo {
-                    Button { Task { await copy(item) } } label: { Label("Copiar", systemImage: "doc.on.doc") }
-                }
-                Button { showDay(item) } label: { Label("Ver en el día", systemImage: "calendar") }
-                Divider()
-                Button { store.setHidden(item, !hidden) } label: {
-                    Label(hidden ? "Mostrar en Fototeca" : "Ocultar", systemImage: hidden ? "eye" : "eye.slash")
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle").frame(maxWidth: .infinity).frame(height: 54).contentShape(Rectangle())
-            }
-            .accessibilityLabel("Más")
         }
-        .font(.system(size: 20, weight: .semibold))
-        .foregroundStyle(Palette.ink)
-        .padding(.horizontal, 10)
-        .liquidCapsule()
-        .padding(.horizontal, 22)
-    }
-
-    private func barButton(_ symbol: String, _ label: String, tint: Color? = nil, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol).foregroundStyle(tint ?? Palette.ink)
-                .frame(maxWidth: .infinity).frame(height: 54).contentShape(Rectangle())
-        }
-        .buttonStyle(PressStyle())
-        .accessibilityLabel(label)
+        .padding(.horizontal, 14)
     }
 
     private func detail(_ item: GalleryItem) -> String {
@@ -306,6 +351,16 @@ struct ViewerView: View {
     }
 }
 
+/// Icon above a short word, for the middle piece of the viewer's bar.
+struct BarLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(spacing: 2) {
+            configuration.icon.font(.system(size: 18, weight: .semibold))
+            configuration.title.font(.system(size: 10.5, weight: .semibold))
+        }
+    }
+}
+
 extension View {
     @ViewBuilder func liquidCircle() -> some View {
         if #available(iOS 26, *) {
@@ -313,6 +368,165 @@ extension View {
         } else {
             background(.regularMaterial, in: Circle()).overlay(Circle().stroke(Palette.stroke, lineWidth: 0.75))
         }
+    }
+}
+
+// MARK: Pager
+
+enum VerticalDrag {
+    case changed(CGFloat)
+    /// Distance and speed (points per second; positive is down).
+    case ended(CGFloat, CGFloat)
+}
+
+/// The pages, in a native paging collection view. A vertical swipe is recognised on the
+/// first movement: when it is more vertical than horizontal the pages do not move sideways
+/// at all, so swiping up for the information never turns the page.
+struct ViewerPager: UIViewRepresentable {
+    let items: [GalleryItem]
+    @Binding var current: String?
+    var chrome: Bool
+    /// No sideways paging (zoomed in, or the information is open).
+    var locked: Bool
+    /// Zoomed in: dragging moves the photo, so vertical swipes are off too.
+    var zoomed: Bool
+    var store: GalleryStore
+    var poster: (GalleryItem) -> UIImage?
+    var toggleChrome: () -> Void
+    var zoomChanged: (Bool) -> Void
+    var vertical: (VerticalDrag) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> PagerContainer {
+        let container = PagerContainer()
+        let view = container.collectionView
+        view.dataSource = context.coordinator
+        view.delegate = context.coordinator
+        let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.pan(_:)))
+        pan.delegate = context.coordinator
+        view.addGestureRecognizer(pan)
+        // Sideways paging waits only until the vertical swipe declines, on the first movement.
+        view.panGestureRecognizer.require(toFail: pan)
+        context.coordinator.verticalPan = pan
+        container.onLayout = { [weak coordinator = context.coordinator] in coordinator?.scrollToCurrent(animated: false) }
+        return container
+    }
+
+    func updateUIView(_ container: PagerContainer, context: Context) {
+        let coordinator = context.coordinator
+        let previous = coordinator.parent
+        coordinator.parent = self
+        let view = container.collectionView
+        view.isScrollEnabled = !locked
+        coordinator.verticalPan?.isEnabled = !zoomed
+        if current != coordinator.shownID { coordinator.scrollToCurrent(animated: true) }
+        if previous.chrome != chrome || previous.current != current {
+            view.reconfigureItems(at: view.indexPathsForVisibleItems)
+        }
+    }
+
+    final class Coordinator: NSObject, UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UIGestureRecognizerDelegate {
+        var parent: ViewerPager
+        weak var verticalPan: UIPanGestureRecognizer?
+        var shownID: String?
+        private lazy var positions: [String: Int] = Dictionary(parent.items.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
+
+        init(_ parent: ViewerPager) {
+            self.parent = parent
+            self.shownID = parent.current
+        }
+
+        func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int { parent.items.count }
+
+        func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
+            let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "page", for: indexPath)
+            let parent = self.parent
+            let item = parent.items[indexPath.item]
+            let currentIndex = parent.current.flatMap { positions[$0] } ?? 0
+            cell.backgroundConfiguration = .clear()
+            cell.contentConfiguration = UIHostingConfiguration {
+                ViewerPage(item: item, active: item.id == parent.current, chrome: parent.chrome, upcoming: indexPath.item == currentIndex + 1,
+                           poster: parent.poster(item), toggleChrome: parent.toggleChrome, zoomChanged: parent.zoomChanged)
+                    .environmentObject(parent.store)
+            }
+            .margins(.all, 0)
+            return cell
+        }
+
+        func collectionView(_ collectionView: UICollectionView, layout: UICollectionViewLayout, sizeForItemAt indexPath: IndexPath) -> CGSize {
+            collectionView.bounds.size
+        }
+
+        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { settle(scrollView) }
+        func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { settle(scrollView) }
+
+        private func settle(_ scrollView: UIScrollView) {
+            guard scrollView.bounds.width > 0 else { return }
+            let index = Int((scrollView.contentOffset.x / scrollView.bounds.width).rounded())
+            guard parent.items.indices.contains(index) else { return }
+            let id = parent.items[index].id
+            shownID = id
+            if parent.current != id { parent.current = id }
+        }
+
+        func scrollToCurrent(animated: Bool) {
+            guard let view = verticalPan?.view as? UICollectionView, view.bounds.width > 0,
+                  let id = parent.current, let index = positions[id] else { return }
+            shownID = id
+            view.scrollToItem(at: IndexPath(item: index, section: 0), at: .centeredHorizontally, animated: animated)
+        }
+
+        // MARK: Vertical swipe
+
+        func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
+            guard let pan = gesture as? UIPanGestureRecognizer, let view = pan.view else { return false }
+            let velocity = pan.velocity(in: view)
+            return abs(velocity.y) > abs(velocity.x) * 1.1
+        }
+
+        @objc func pan(_ gesture: UIPanGestureRecognizer) {
+            let translation = gesture.translation(in: gesture.view).y
+            switch gesture.state {
+            case .began, .changed: parent.vertical(.changed(translation))
+            case .ended, .cancelled, .failed: parent.vertical(.ended(translation, gesture.velocity(in: gesture.view).y))
+            default: break
+            }
+        }
+    }
+}
+
+/// Holds the pager and keeps each page as big as the screen when the size changes.
+final class PagerContainer: UIView {
+    let collectionView: UICollectionView
+    var onLayout: (() -> Void)?
+    private var lastSize: CGSize = .zero
+
+    override init(frame: CGRect) {
+        let layout = UICollectionViewFlowLayout()
+        layout.scrollDirection = .horizontal
+        layout.minimumLineSpacing = 0
+        layout.minimumInteritemSpacing = 0
+        collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
+        super.init(frame: frame)
+        collectionView.backgroundColor = .clear
+        collectionView.isPagingEnabled = true
+        collectionView.showsHorizontalScrollIndicator = false
+        collectionView.contentInsetAdjustmentBehavior = .never
+        collectionView.register(UICollectionViewCell.self, forCellWithReuseIdentifier: "page")
+        addSubview(collectionView)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        collectionView.frame = bounds
+        guard bounds.size != lastSize, bounds.width > 0 else { return }
+        lastSize = bounds.size
+        collectionView.collectionViewLayout.invalidateLayout()
+        collectionView.layoutIfNeeded()
+        onLayout?()
     }
 }
 
@@ -368,71 +582,88 @@ struct ActivitySheet: UIViewControllerRepresentable {
 
 // MARK: Information
 
-/// Ⓘ: when and where the photo was taken, with what, the file and its albums.
-struct InfoSheet: View {
+/// Below the lifted photo: when and where it was taken, with what, the file and its albums.
+struct InfoPanel: View {
     @EnvironmentObject var store: GalleryStore
     let item: GalleryItem
     @State private var info: PhotoInfo?
     @State private var place: String?
 
     var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(Timeline.format(item.date, "EEEE d 'de' MMMM 'de' y")).font(.headline)
-                        Text(Timeline.format(item.date, "HH:mm") + (item.duration.map { " · " + durationText($0) } ?? ""))
-                            .font(.subheadline).foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 4)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Capsule().fill(Palette.secondary.opacity(0.35)).frame(width: 38, height: 5).frame(maxWidth: .infinity)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(Timeline.format(item.date, "EEEE d 'de' MMMM 'de' y")).font(.title3.bold()).foregroundStyle(Palette.ink)
+                    Text(Timeline.format(item.date, "HH:mm") + (item.duration.map { " · " + durationText($0) } ?? ""))
+                        .font(.subheadline).foregroundStyle(Palette.secondary)
                 }
                 if let info {
                     if info.camera != nil || info.lens != nil || info.exposure != nil {
-                        Section("Cámara") {
-                            if let camera = info.camera { Label(camera, systemImage: "camera") }
-                            if let lens = info.lens { Label(lens, systemImage: "camera.aperture") }
-                            if let exposure = info.exposure { Label(exposure, systemImage: "dial.medium") }
+                        group {
+                            if let camera = info.camera { row(camera, "camera") }
+                            if let lens = info.lens { row(lens, "camera.aperture") }
+                            if let exposure = info.exposure { row(exposure, "dial.medium") }
                         }
                     }
-                    Section("Archivo") {
-                        if let name = info.fileName { LabeledContent("Nombre", value: name) }
-                        if let format = info.format, !format.isEmpty { LabeledContent("Formato", value: format) }
-                        if let resolution = info.resolution { LabeledContent("Resolución", value: resolution) }
-                        if let bytes = info.bytes { LabeledContent("Tamaño", value: ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) }
+                    group {
+                        if let name = info.fileName { row(name, "doc") }
+                        let details = [info.format.flatMap { $0.isEmpty ? nil : $0 }, info.resolution,
+                                       info.bytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }].compactMap { $0 }
+                        if !details.isEmpty { row(details.joined(separator: " · "), "photo") }
                     }
                     if let location = info.location {
-                        Section("Ubicación") {
+                        VStack(alignment: .leading, spacing: 8) {
                             Map(initialPosition: .region(MKCoordinateRegion(center: location, latitudinalMeters: 1500, longitudinalMeters: 1500))) {
                                 Marker(place ?? "", coordinate: location)
                             }
-                            .frame(height: 180)
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            .listRowInsets(EdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8))
-                            if let place { Label(place, systemImage: "mappin.and.ellipse") }
+                            .frame(height: 170)
+                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            if let place { row(place, "mappin.and.ellipse") }
                         }
                     }
                 } else {
-                    Section { HStack { Spacer(); ProgressView(); Spacer() } }
+                    ProgressView().frame(maxWidth: .infinity).padding(.vertical, 20)
                 }
-                Section("Dónde está") {
+                group {
                     if item.isNAS {
-                        Label(store.nasLabel + " · " + ((item.folder?.isEmpty ?? true) ? "carpeta principal" : item.folder!), systemImage: "server.rack")
+                        row(store.nasLabel + " · " + ((item.folder?.isEmpty ?? true) ? "carpeta principal" : item.folder!), "server.rack")
                     } else {
-                        Label("Este iPhone", systemImage: "iphone")
+                        row("Este iPhone", "iphone")
                     }
                     let albums = store.albums.filter { $0.items.contains(item.id) }
-                    if !albums.isEmpty { Label(albums.map(\.name).joined(separator: ", "), systemImage: "rectangle.stack") }
-                    if store.isFavorite(item) { Label("Favoritos", systemImage: "heart.fill") }
+                    if !albums.isEmpty { row(albums.map(\.name).joined(separator: ", "), "rectangle.stack") }
+                    if store.isFavorite(item) { row("Favoritos", "heart.fill") }
                 }
             }
-            .navigationTitle("Información")
-            .navigationBarTitleDisplayMode(.inline)
+            .padding(.horizontal, 18)
+            .padding(.top, 10)
+            .padding(.bottom, 40)
         }
-        .presentationDetents([.medium, .large])
-        .task {
+        .scrollIndicators(.hidden)
+        .background(Palette.background, in: UnevenRoundedRectangle(topLeadingRadius: 28, topTrailingRadius: 28, style: .continuous))
+        .task(id: item.id) {
+            info = nil
+            place = nil
             let loaded = await PhotoInfo.load(item, account: store.account)
             info = loaded
             if let location = loaded.location { place = await PhotoInfo.placeName(location) }
         }
+    }
+
+    private func group<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10, content: content)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white.opacity(0.85), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func row(_ text: String, _ symbol: String) -> some View {
+        Label {
+            Text(text).foregroundStyle(Palette.ink).fixedSize(horizontal: false, vertical: true)
+        } icon: {
+            Image(systemName: symbol).foregroundStyle(Palette.accent)
+        }
+        .font(.subheadline)
     }
 }

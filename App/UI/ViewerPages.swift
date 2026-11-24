@@ -8,6 +8,8 @@ struct ViewerPage: View {
     let item: GalleryItem
     let active: Bool
     let chrome: Bool
+    /// The next page: a video there starts loading ahead.
+    var upcoming = false
     /// A picture of the item with its real shape, shown at once while the sharp one loads.
     var poster: UIImage?
     var toggleChrome: () -> Void
@@ -15,7 +17,7 @@ struct ViewerPage: View {
 
     var body: some View {
         switch item.kind {
-        case .video: VideoPage(item: item, active: active, chrome: chrome, poster: poster, toggleChrome: toggleChrome)
+        case .video: VideoPage(item: item, active: active, chrome: chrome, upcoming: upcoming, poster: poster, toggleChrome: toggleChrome)
         case .livePhoto: LivePhotoPage(item: item, poster: poster, toggleChrome: toggleChrome)
         case .photo: PhotoPage(item: item, poster: poster, toggleChrome: toggleChrome, zoomChanged: zoomChanged)
         }
@@ -267,6 +269,7 @@ struct VideoPage: View {
     let item: GalleryItem
     let active: Bool
     let chrome: Bool
+    var upcoming = false
     var poster: UIImage?
     var toggleChrome: () -> Void
     @StateObject private var model = VideoModel()
@@ -303,7 +306,8 @@ struct VideoPage: View {
         .task(id: active) {
             if active { await start() } else { model.player.pause() }
         }
-        .task { await prefetch() }
+        // Only the next video loads ahead, so the NAS is not asked for every neighbour.
+        .task(id: upcoming) { if upcoming { await prefetch() } }
         .onDisappear { model.stop(); vlcURL = nil }
     }
 
@@ -368,8 +372,8 @@ struct VideoPage: View {
         }
     }
 
-    /// As soon as a NAS video is near, its start and end (where the index often is) are
-    /// fetched, so it begins almost at once.
+    /// The video after the one on screen gets its start and end (where the index often is)
+    /// fetched ahead, so it begins almost at once.
     private func prefetch() async {
         guard let url = item.nasURL, let account = store.account else { return }
         let file = StreamFile(url: url, bytes: item.bytes)

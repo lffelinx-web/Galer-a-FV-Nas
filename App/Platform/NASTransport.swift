@@ -43,213 +43,154 @@ final class NASTransport: @unchecked Sendable {
         }
     }
 
+    /// Tries a connection kept open from an earlier request first; a stale one (closed by
+    /// the NAS while idle) is replaced by a new connection once.
     private func requestOnRoute(_ url: URL, route: String, method: String, headers: [String: String], body: Data, limit: Int, allowPrefix: Bool) async throws -> NASResponse {
-
         let dsm = URLPolicy.allowedDSM(url, account: account)
         guard (URLPolicy.allowed(url, root: account.root) && ["GET", "PROPFIND"].contains(method)) || (dsm && ["GET", "POST"].contains(method)),
-
               NASAccount.validRoute(route), !account.username.contains(":"),
-
               let host = url.host, let port = NWEndpoint.Port(rawValue: UInt16(url.port ?? 443)) else {
-
             throw GalleryError.message("La solicitud está fuera de la carpeta autorizada.")
+        }
+        let key = "\(route)|\(host)|\(port.rawValue)"
+        if let pooled = NASConnectionPool.shared.take(key) {
+            do {
+                return try await exchange(url, pooled: pooled, key: key, host: host, port: port, route: route, method: method, headers: headers, body: body, limit: limit, allowPrefix: allowPrefix, dsm: dsm)
+            } catch let error as URLError where error.code == .networkConnectionLost {
+                // The NAS closed it while it waited; continue with a fresh one.
+            } catch let error as NWError {
+                _ = error
+            }
+        }
+        return try await exchange(url, pooled: nil, key: key, host: host, port: port, route: route, method: method, headers: headers, body: body, limit: limit, allowPrefix: allowPrefix, dsm: dsm)
+    }
 
+    private func connect(host: String, port: NWEndpoint.Port, route: String) async throws -> PooledConnection {
+        let tls = NWProtocolTLS.Options()
+        host.withCString { sec_protocol_options_set_tls_server_name(tls.securityProtocolOptions, $0) }
+        sec_protocol_options_add_tls_application_protocol(tls.securityProtocolOptions, "http/1.1")
+        sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv12)
+        sec_protocol_options_set_verify_block(tls.securityProtocolOptions, { _, trust, complete in
+            let value = sec_trust_copy_ref(trust).takeRetainedValue()
+            let policy = SecPolicyCreateSSL(true, host as CFString)
+            guard SecTrustSetPolicies(value, policy) == errSecSuccess else { complete(false); return }
+            complete(SecTrustEvaluateWithError(value, nil))
+        }, DispatchQueue.global(qos: .userInitiated))
+        let tcp = NWProtocolTCP.Options()
+        tcp.enableKeepalive = true
+        let parameters = NWParameters(tls: tls, tcp: tcp)
+        let connection = NWConnection(host: NWEndpoint.Host(route.isEmpty ? host : route), port: port, using: parameters)
+        let queue = DispatchQueue(label: "lfaz.galeria.https.\(UUID().uuidString)")
+        let connectTimeout = DispatchWorkItem { connection.cancel() }
+        queue.asyncAfter(deadline: .now() + 6, execute: connectTimeout)
+        defer { connectTimeout.cancel() }
+        try await withTaskCancellationHandler(operation: {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready: connection.stateUpdateHandler = nil; continuation.resume()
+                    case .failed(let error): connection.stateUpdateHandler = nil; continuation.resume(throwing: error)
+                    case .cancelled: connection.stateUpdateHandler = nil; continuation.resume(throwing: URLError(.timedOut))
+                    default: break
+                    }
+                }
+                connection.start(queue: queue)
+            }
+        }, onCancel: { connection.cancel() })
+        return PooledConnection(connection: connection, reader: SocketReader(connection), queue: queue)
+    }
+
+    private func exchange(_ url: URL, pooled: PooledConnection?, key: String, host: String, port: NWEndpoint.Port, route: String, method: String,
+                          headers: [String: String], body: Data, limit: Int, allowPrefix: Bool, dsm: Bool) async throws -> NASResponse {
+        let link: PooledConnection
+        if let pooled { link = pooled } else { link = try await connect(host: host, port: port, route: route) }
+        let connection = link.connection, reader = link.reader
+        let timeout = DispatchWorkItem { connection.cancel() }
+        link.queue.asyncAfter(deadline: .now() + 35, execute: timeout)
+        // Kept open for the next request only when the whole response was read.
+        var reusable = false
+        defer {
+            timeout.cancel()
+            if reusable { NASConnectionPool.shared.put(key, link) } else { connection.cancel() }
         }
 
-        let tls = NWProtocolTLS.Options()
-
-        host.withCString { sec_protocol_options_set_tls_server_name(tls.securityProtocolOptions, $0) }
-
-        sec_protocol_options_add_tls_application_protocol(tls.securityProtocolOptions, "http/1.1")
-
-        sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv12)
-
-        sec_protocol_options_set_verify_block(tls.securityProtocolOptions, { _, trust, complete in
-
-            let value = sec_trust_copy_ref(trust).takeRetainedValue()
-
-            let policy = SecPolicyCreateSSL(true, host as CFString)
-
-            guard SecTrustSetPolicies(value, policy) == errSecSuccess else { complete(false); return }
-
-            complete(SecTrustEvaluateWithError(value, nil))
-
-        }, DispatchQueue.global(qos: .userInitiated))
-
-        let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
-
-        let connection = NWConnection(host: NWEndpoint.Host(route.isEmpty ? host : route), port: port, using: parameters)
-
-        let queue = DispatchQueue(label: "lfaz.galeria.https.\(UUID().uuidString)")
-
-        let timeout = DispatchWorkItem { connection.cancel() }
-
-        queue.asyncAfter(deadline: .now() + 35, execute: timeout)
-
-        let connectTimeout = DispatchWorkItem { connection.cancel() }
-
-        queue.asyncAfter(deadline: .now() + 4, execute: connectTimeout)
-
-        defer { connectTimeout.cancel(); timeout.cancel(); connection.cancel() }
-
         return try await withTaskCancellationHandler(operation: {
-
             try Task.checkCancellation()
-
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-
-                connection.stateUpdateHandler = { state in
-
-                    switch state {
-
-                    case .ready: connection.stateUpdateHandler = nil; continuation.resume()
-
-                    case .failed(let error): connection.stateUpdateHandler = nil; continuation.resume(throwing: error)
-
-                    case .cancelled: connection.stateUpdateHandler = nil; continuation.resume(throwing: URLError(.timedOut))
-
-                    default: break
-
-                    }
-
-                }
-
-                connection.start(queue: queue)
-
-            }
-
-            connectTimeout.cancel()
-
             let components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
             // Only DSM API calls carry a query; WebDAV URLs never do.
             let path = components.percentEncodedPath + (dsm ? components.percentEncodedQuery.map { "?" + $0 } ?? "" : "")
-
             let hostValue = (host.contains(":") ? "[\(host)]" : host) + (url.port.map { ":\($0)" } ?? "")
-
             let credential = Data("\(account.username):\(account.password)".utf8).base64EncodedString()
-
-            var lines = ["\(method) \(path.isEmpty ? "/" : path) HTTP/1.1", "Host: \(hostValue)", "Authorization: Basic \(credential)", "Connection: close", "Accept-Encoding: identity", "Content-Length: \(body.count)"]
-
+            var lines = ["\(method) \(path.isEmpty ? "/" : path) HTTP/1.1", "Host: \(hostValue)", "Authorization: Basic \(credential)",
+                         "Connection: keep-alive", "Accept-Encoding: identity", "Content-Length: \(body.count)"]
             for (key, value) in headers {
-
                 guard !key.contains("\r"), !key.contains("\n"), !value.contains("\r"), !value.contains("\n") else { throw GalleryError.message("Cabecera no válida.") }
-
                 lines.append("\(key): \(value)")
-
             }
-
             var wire = Data((lines.joined(separator: "\r\n") + "\r\n\r\n").utf8); wire.append(body)
-
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-
                 connection.send(content: wire, completion: .contentProcessed { error in
-
                     if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-
                 })
-
             }
-
-            let reader = SocketReader(connection)
-
             let head = try await reader.until(Data("\r\n\r\n".utf8), max: 65536)
-
             guard let text = String(data: head, encoding: .isoLatin1), let first = text.components(separatedBy: "\r\n").first,
-
                   let status = Int(first.split(separator: " ").dropFirst().first ?? ""), (200...299).contains(status) else {
-
                 let statusLine = String(data: head.prefix(100), encoding: .isoLatin1) ?? ""
-
                 if statusLine.contains("401") { throw GalleryError.message("Usuario o contraseña incorrectos.") }
-
                 if statusLine.contains("403") { throw GalleryError.message("La cuenta no tiene permiso de lectura.") }
-
                 throw GalleryError.message("El NAS rechazó la solicitud. Revisa la carpeta y el acceso WebDAV; no se siguen redirecciones.")
-
             }
-
             var fields: [String: String] = [:]
-
             for line in text.components(separatedBy: "\r\n").dropFirst() {
-
                 if let colon = line.firstIndex(of: ":") {
-
                     fields[String(line[..<colon]).lowercased()] = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
-
                 }
-
             }
-
             if let encoding = fields["content-encoding"], encoding != "identity" { throw GalleryError.message("El NAS envió una codificación no compatible.") }
-
             var result = Data()
-
+            var complete = false
             func append(_ part: Data) throws -> Bool {
-
                 if result.count + part.count > limit {
-
                     guard allowPrefix else { throw GalleryError.message("La respuesta excede el tamaño permitido.") }
-
                     result.append(part.prefix(limit - result.count)); return false
-
                 }
-
                 result.append(part); return !allowPrefix || result.count < limit
-
             }
-
             if fields["transfer-encoding"]?.lowercased() == "chunked" {
-
                 outer: while true {
-
                     let line = try await reader.until(Data("\r\n".utf8), max: 4096)
-
                     guard let text = String(data: line, encoding: .ascii), let number = text.split(separator: ";").first,
-
                           let size = Int(number, radix: 16), size >= 0 else { throw GalleryError.message("Respuesta HTTP incompleta.") }
-
-                    if size == 0 { break }
-
-                    var remaining = size
-
-                    while remaining > 0 {
-
-                        let part = try await reader.exactly(min(65536, remaining)); remaining -= part.count
-
-                        if try !append(part) { break outer }
-
+                    if size == 0 {
+                        // Trailers end with an empty line; then the connection can be reused.
+                        while !(try await reader.until(Data("\r\n".utf8), max: 4096)).isEmpty {}
+                        complete = true
+                        break
                     }
-
+                    var remaining = size
+                    while remaining > 0 {
+                        let part = try await reader.exactly(min(65536, remaining)); remaining -= part.count
+                        if try !append(part) { break outer }
+                    }
                     guard try await reader.exactly(2) == Data("\r\n".utf8) else { throw GalleryError.message("Respuesta HTTP no válida.") }
-
                 }
-
             } else if let text = fields["content-length"], let size = Int64(text), size >= 0 {
-
                 if size > Int64(limit) && !allowPrefix { throw GalleryError.message("La respuesta excede el tamaño permitido.") }
-
                 var remaining = size
-
                 while remaining > 0 {
-
                     let part = try await reader.exactly(Int(min(65536, remaining))); remaining -= Int64(part.count)
-
                     if try !append(part) { break }
-
                 }
-
+                complete = remaining == 0
             } else {
-
                 while let part = try await reader.some() { if try !append(part) { break } }
-
             }
-
             try Task.checkCancellation()
-
+            reusable = complete && reader.isEmpty && fields["connection"]?.lowercased() != "close"
             return NASResponse(status: status, headers: fields, data: result)
-
         }, onCancel: { connection.cancel() })
-
     }
 
     func list(_ folder: URL) async throws -> [DAVEntry] {
@@ -332,7 +273,44 @@ extension NASTransport {
     }
 }
 
-private final class SocketReader {
+/// An open HTTPS connection to the NAS with what is left in its buffer.
+struct PooledConnection {
+    let connection: NWConnection
+    let reader: SocketReader
+    let queue: DispatchQueue
+}
+
+/// Connections kept open between requests: opening one costs the NAS a TLS handshake,
+/// the heaviest part of a request for a small NAS. Idle ones are closed after 15 s.
+final class NASConnectionPool: @unchecked Sendable {
+    static let shared = NASConnectionPool()
+    private let lock = NSLock()
+    private var idle: [String: [(link: PooledConnection, since: Date)]] = [:]
+
+    func take(_ key: String) -> PooledConnection? {
+        lock.lock(); defer { lock.unlock() }
+        var list = idle[key] ?? []
+        defer { idle[key] = list }
+        while let entry = list.popLast() {
+            if Date().timeIntervalSince(entry.since) < 15, entry.link.connection.state == .ready { return entry.link }
+            entry.link.connection.cancel()
+        }
+        return nil
+    }
+
+    func put(_ key: String, _ link: PooledConnection) {
+        lock.lock(); defer { lock.unlock() }
+        var list = (idle[key] ?? []).filter { entry in
+            let fresh = Date().timeIntervalSince(entry.since) < 15
+            if !fresh { entry.link.connection.cancel() }
+            return fresh
+        }
+        if list.count >= 6 { link.connection.cancel() } else { list.append((link, Date())) }
+        idle[key] = list
+    }
+}
+
+final class SocketReader {
 
     let connection: NWConnection
 
@@ -346,7 +324,8 @@ private final class SocketReader {
 
         try Task.checkCancellation()
 
-        if ended { throw GalleryError.message("La conexión se interrumpió antes de completar el archivo.") }
+        // The NAS closed the connection; a request on a reused connection is then retried.
+        if ended { throw URLError(.networkConnectionLost) }
 
         let pair: (Data, Bool) = try await withCheckedThrowingContinuation { continuation in
 
@@ -389,6 +368,8 @@ private final class SocketReader {
         let result = Data(buffer.prefix(count)); buffer = Data(buffer.dropFirst(count)); return result
 
     }
+
+    var isEmpty: Bool { buffer.isEmpty }
 
     func some() async throws -> Data? {
 

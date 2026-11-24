@@ -4,13 +4,15 @@ import Photos
 import UIKit
 
 enum NASState: Equatable {
-    case notConfigured, checking, connected, offline
+    /// `slow`: connected, but the last check did not answer in time (a busy NAS).
+    case notConfigured, checking, connected, slow, offline
 
     var label: String {
         switch self {
         case .notConfigured: return "NAS sin configurar"
         case .checking: return "Conectando…"
         case .connected: return "NAS conectado"
+        case .slow: return "Conexión lenta"
         case .offline: return "NAS sin conexión"
         }
     }
@@ -20,6 +22,7 @@ enum NASState: Equatable {
         case .notConfigured: return "Sin configurar"
         case .checking: return "Conectando…"
         case .connected: return "Conectado"
+        case .slow: return "Conexión lenta"
         case .offline: return "Sin conexión"
         }
     }
@@ -27,7 +30,7 @@ enum NASState: Equatable {
     var color: Color {
         switch self {
         case .connected: return Palette.online
-        case .checking: return Palette.warning
+        case .checking, .slow: return Palette.warning
         case .offline: return .red
         case .notConfigured: return .gray
         }
@@ -130,6 +133,7 @@ final class GalleryStore: ObservableObject {
     private var lastStatusUpdate = Date.distantPast
     private var lastSpaceCheck = Date.distantPast
     private var folderCache: [String: CachedFolder] = [:]
+    private var failedChecks = 0
 
     private var indexName: String { "nas-" + String(Files.key(account?.scope ?? "none").prefix(16)) + ".json" }
     private var aspectsName: String { "aspects-" + String(Files.key(account?.scope ?? "none").prefix(16)) + ".json" }
@@ -154,7 +158,7 @@ final class GalleryStore: ObservableObject {
 
     var statusText: String {
         switch nasState {
-        case .connected, .checking, .offline: return nasState.label + " • " + nasLabel
+        case .connected, .checking, .slow, .offline: return nasState.label + " • " + nasLabel
         case .notConfigured: return nasState.label
         }
     }
@@ -285,18 +289,24 @@ final class GalleryStore: ObservableObject {
         merge()
     }
 
+    /// One failed check while connected only means «Conexión lenta»: a busy NAS answers late.
+    /// Two in a row mean it is really out of reach.
     func checkConnection() async {
         guard let account else { nasState = .notConfigured; return }
-        if nasState != .connected { nasState = .checking }
+        if nasState == .notConfigured || nasState == .offline { nasState = .checking }
         do {
             let response = try await NASTransport(account).request(account.root, method: "PROPFIND", headers: ["Depth": "0"])
             guard self.account?.scope == account.scope else { return }
             lastRoute = response.route
+            failedChecks = 0
             nasState = response.status == 207 ? .connected : .offline
             if nasState == .connected { await refreshSpace(account) }
         } catch {
             guard self.account?.scope == account.scope else { return }
-            nasState = .offline
+            if error is GalleryError { nasState = .offline; return }
+            failedChecks += 1
+            let wasReachable = nasState == .connected || nasState == .slow
+            nasState = wasReachable && failedChecks < 2 ? .slow : .offline
         }
     }
 
@@ -336,7 +346,7 @@ final class GalleryStore: ObservableObject {
                 scanStatus = nil
                 guard !Task.isCancelled, !(error is CancellationError) else { return }
                 // Only a network failure means the NAS is offline; a bad listing is reported as an error.
-                if self.account?.scope == account.scope, !(error is GalleryError) { nasState = .offline }
+                if self.account?.scope == account.scope, !(error is GalleryError) { nasState = nasState == .connected ? .slow : .offline }
                 if !quiet { self.error = error.localizedDescription }
             }
         }
@@ -418,7 +428,14 @@ final class GalleryStore: ObservableObject {
             var lastReorder = Date()
             var start = 0
             while start < pending.count, !Task.isCancelled {
-                let chunk = Array(pending[start..<min(start + 4, pending.count)])
+                // Background work waits while you look at photos or thumbnails are loading,
+                // so the NAS answers what is on screen first.
+                while !Task.isCancelled {
+                    let busy = await NASImageLoader.shared.isBusy()
+                    if viewer == nil && !busy { break }
+                    try? await Task.sleep(nanoseconds: 800_000_000)
+                }
+                let chunk = Array(pending[start..<min(start + 2, pending.count)])
                 start += chunk.count
                 let results = await withTaskGroup(of: (String, CaptureInfo?).self) { group -> [(String, CaptureInfo?)] in
                     for item in chunk { group.addTask { (item.id, await CaptureReader.read(item, transport: transport)) } }
