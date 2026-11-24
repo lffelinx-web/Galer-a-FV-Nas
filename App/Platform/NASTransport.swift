@@ -253,7 +253,7 @@ final class NASTransport: @unchecked Sendable {
 
         let xml = Data("<?xml version=\"1.0\"?><d:propfind xmlns:d=\"DAV:\"><d:prop><d:displayname/><d:resourcetype/><d:getcontentlength/><d:getlastmodified/></d:prop></d:propfind>".utf8)
 
-        let response = try await request(folder, method: "PROPFIND", headers: ["Depth": "1", "Content-Type": "application/xml; charset=utf-8"], body: xml)
+        let response = try await request(folder, method: "PROPFIND", headers: ["Depth": "1", "Content-Type": "application/xml; charset=utf-8"], body: xml, limit: DAVParser.maxResponse)
 
         guard response.status == 207 else { throw GalleryError.message("La dirección no corresponde a WebDAV.") }
 

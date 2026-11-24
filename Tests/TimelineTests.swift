@@ -120,3 +120,22 @@ final class NASTests: XCTestCase {
         XCTAssertEqual(year.files.map(\.name), ["b.jpg"])
     }
 }
+
+final class WebDAVTests: XCTestCase {
+    /// A folder with thousands of photos returns a listing of several megabytes.
+    func testParsesLargeFolderListing() throws {
+        let folder = URL(string: "https://nas.example.com:5006/home/Photos/")!
+        var xml = "<?xml version=\"1.0\"?><d:multistatus xmlns:d=\"DAV:\">"
+        for index in 0..<12_000 {
+            xml += "<d:response><d:href>/home/Photos/IMG_\(String(format: "%05d", index)).HEIC</d:href><d:propstat><d:prop>"
+            xml += "<d:displayname>IMG_\(String(format: "%05d", index)).HEIC</d:displayname><d:resourcetype/><d:getcontentlength>2345678</d:getcontentlength>"
+            xml += "<d:getlastmodified>Sun, 14 May 2023 10:15:30 GMT</d:getlastmodified></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
+        }
+        xml += "</d:multistatus>"
+        let data = Data(xml.utf8)
+        XCTAssertGreaterThan(data.count, 2_000_000)
+        let entries = try DAVParser.parse(data, folder: folder)
+        XCTAssertEqual(entries.count, 12_000)
+        XCTAssertEqual(entries.first?.kind, .photo)
+    }
+}

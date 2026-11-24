@@ -48,6 +48,8 @@ struct DAVEntry {
 }
 
 final class DAVParser: NSObject, XMLParserDelegate {
+    /// A folder with tens of thousands of photos answers with a large listing.
+    static let maxResponse = 96 * 1_048_576
     private let folder: URL
     private var names: [String] = []
     private var buffer = ""
@@ -65,7 +67,7 @@ final class DAVParser: NSObject, XMLParserDelegate {
     }()
     static func httpDate(_ text: String) -> Date? { dateFormatter.date(from: text) }
     static func parse(_ data: Data, folder: URL) throws -> [DAVEntry] {
-        guard data.count <= 2_000_000, let xml = String(data: data, encoding: .utf8),
+        guard data.count <= maxResponse, let xml = String(data: data, encoding: .utf8),
               xml.range(of: "<!\\s*(DOCTYPE|ENTITY)", options: [.regularExpression, .caseInsensitive]) == nil else {
             throw GalleryError.message("Respuesta WebDAV demasiado grande o XML no permitido.")
         }

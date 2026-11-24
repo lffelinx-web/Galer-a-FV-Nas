@@ -171,7 +171,8 @@ final class GalleryStore: ObservableObject {
             } catch {
                 scanStatus = nil
                 guard !Task.isCancelled, !(error is CancellationError) else { return }
-                if self.account?.scope == account.scope { nasState = .offline }
+                // Only a network failure means the NAS is offline; a bad listing is reported as an error.
+                if self.account?.scope == account.scope, !(error is GalleryError) { nasState = .offline }
                 self.error = error.localizedDescription
             }
         }
