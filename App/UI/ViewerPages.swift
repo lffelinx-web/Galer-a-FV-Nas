@@ -12,15 +12,21 @@ struct ViewerPage: View {
     var upcoming = false
     /// A picture of the item with its real shape, shown at once while the sharp one loads.
     var poster: UIImage?
+    /// Room kept free for the bars while they show, so the photo is never under them.
+    var insets = EdgeInsets()
     var toggleChrome: () -> Void
     var zoomChanged: (Bool) -> Void
 
     var body: some View {
-        switch item.kind {
-        case .video: VideoPage(item: item, active: active, chrome: chrome, upcoming: upcoming, poster: poster, toggleChrome: toggleChrome)
-        case .livePhoto: LivePhotoPage(item: item, poster: poster, toggleChrome: toggleChrome)
-        case .photo: PhotoPage(item: item, poster: poster, toggleChrome: toggleChrome, zoomChanged: zoomChanged)
+        Group {
+            switch item.kind {
+            case .video: VideoPage(item: item, active: active, chrome: chrome, upcoming: upcoming, poster: poster, insets: insets, toggleChrome: toggleChrome)
+            case .livePhoto: LivePhotoPage(item: item, poster: poster, toggleChrome: toggleChrome).padding(insets)
+            case .photo: PhotoPage(item: item, poster: poster, toggleChrome: toggleChrome, zoomChanged: zoomChanged).padding(insets)
+            }
         }
+        // Grows to the whole screen when the bars hide, and back.
+        .animation(.spring(response: 0.38, dampingFraction: 0.88), value: insets)
     }
 }
 
@@ -271,6 +277,7 @@ struct VideoPage: View {
     let chrome: Bool
     var upcoming = false
     var poster: UIImage?
+    var insets = EdgeInsets()
     var toggleChrome: () -> Void
     @StateObject private var model = VideoModel()
     @State private var vlcURL: URL?
@@ -282,12 +289,12 @@ struct VideoPage: View {
     var body: some View {
         ZStack {
             Color.clear
-            PlayerLayerView(player: model.player).opacity(model.ready ? 1 : 0)
+            PlayerLayerView(player: model.player).opacity(model.ready ? 1 : 0).padding(insets)
             if let vlcURL {
                 VLCInlinePlayer(url: vlcURL, active: active, chrome: chrome, muted: model.muted, toggleChrome: toggleChrome)
             }
             if !model.ready && vlcURL == nil {
-                posterView
+                posterView.padding(insets)
                 if failure == nil && active { ProgressView().tint(.white).scaleEffect(1.2) }
             }
             if vlcURL == nil { Color.clear.contentShape(Rectangle()).onTapGesture { toggleChrome() } }
@@ -374,8 +381,10 @@ struct VideoPage: View {
 /// Spacing of the viewer's bottom controls, shared by the pages and the bars.
 enum ViewerMetrics {
     static let barHeight: CGFloat = 48
-    @MainActor static var safeBottom: CGFloat {
-        (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.keyWindow?.safeAreaInsets.bottom ?? 0
+    @MainActor static var safeBottom: CGFloat { safeArea.bottom }
+    @MainActor static var safeArea: EdgeInsets {
+        let insets = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.keyWindow?.safeAreaInsets ?? .zero
+        return EdgeInsets(top: insets.top, leading: insets.left, bottom: insets.bottom, trailing: insets.right)
     }
     /// Just above the action bar, where photos show the thumbnail strip.
     @MainActor static var videoBarBottom: CGFloat { safeBottom + 4 + barHeight + 12 }

@@ -21,6 +21,8 @@ struct ViewerView: View {
     @State private var working: String?
     @State private var toast: String?
     @State private var places: [String: String] = [:]
+    /// The screen's safe area, for the zoom to land where the page draws the photo.
+    @State private var safe = ViewerMetrics.safeArea
     /// 0: the photo sits on its tile; 1: it fills the screen. Animated when opening and closing.
     @State private var progress: CGFloat
     @State private var settled: Bool
@@ -48,6 +50,7 @@ struct ViewerView: View {
             ZStack(alignment: .top) {
                 Color.black.opacity((1 - min(dragY / 500, 0.7)) * progress).ignoresSafeArea()
                 ViewerPager(items: context.items, current: $current, chrome: chrome && settled && info == 0, locked: zoomed || info > 0, zoomed: zoomed,
+                            insets: mediaInsets(geo.safeAreaInsets, chrome: chrome),
                             store: store, poster: poster(for:),
                             toggleChrome: { withAnimation(.easeInOut(duration: 0.2)) { chrome.toggle() } },
                             zoomChanged: { zoomed = $0 },
@@ -58,6 +61,8 @@ struct ViewerView: View {
                     .offset(y: dragY + info * geo.safeAreaInsets.top * 0.5)
                     .opacity(settled ? 1 : 0)
                     .simultaneousGesture(TapGesture().onEnded { if infoOpen { setInfo(false) } }, including: infoOpen ? .all : .none)
+                    .onAppear { safe = geo.safeAreaInsets }
+                    .onChange(of: geo.safeAreaInsets) { _, value in safe = value }
                 if !settled { zoomLayer }
                 if info > 0, let item = currentItem {
                     InfoPanel(item: item)
@@ -153,7 +158,11 @@ struct ViewerView: View {
     private var zoomLayer: some View {
         GeometryReader { geo in
             if let image = context.sourceImage, let source = context.sourceFrame {
-                let target = fitted(aspect: aspect(of: image), in: CGRect(origin: .zero, size: geo.size))
+                // The same room the page leaves for the bars, so the photo lands exactly where the page draws it.
+                let room = mediaInsets(safe, chrome: chrome)
+                let target = fitted(aspect: aspect(of: image), in: CGRect(x: room.leading, y: room.top,
+                                                                          width: geo.size.width - room.leading - room.trailing,
+                                                                          height: geo.size.height - room.top - room.bottom))
                 let frame = CGRect(x: source.minX + (target.minX - source.minX) * progress,
                                    y: source.minY + (target.minY - source.minY) * progress + dragY,
                                    width: source.width + (target.width - source.width) * progress,
@@ -168,6 +177,13 @@ struct ViewerView: View {
         }
         .ignoresSafeArea()
         .allowsHitTesting(false)
+    }
+
+    /// Between the top bar and the strip of thumbnails while the bars show; the whole
+    /// screen when they hide.
+    private func mediaInsets(_ safe: EdgeInsets, chrome: Bool) -> EdgeInsets {
+        guard chrome else { return EdgeInsets() }
+        return EdgeInsets(top: safe.top + 58, leading: 0, bottom: safe.bottom + 4 + ViewerMetrics.barHeight + 12 + 40 + 10, trailing: 0)
     }
 
     private func aspect(of image: UIImage) -> CGFloat {
@@ -379,6 +395,7 @@ struct ViewerPager: UIViewRepresentable {
     var locked: Bool
     /// Zoomed in: dragging moves the photo, so vertical swipes are off too.
     var zoomed: Bool
+    var insets: EdgeInsets
     var store: GalleryStore
     var poster: (GalleryItem) -> UIImage?
     var toggleChrome: () -> Void
@@ -410,7 +427,7 @@ struct ViewerPager: UIViewRepresentable {
         view.isScrollEnabled = !locked
         coordinator.verticalPan?.isEnabled = !zoomed
         if current != coordinator.shownID { coordinator.scrollToCurrent(animated: true) }
-        if previous.chrome != chrome || previous.current != current {
+        if previous.chrome != chrome || previous.current != current || previous.insets != insets {
             view.reconfigureItems(at: view.indexPathsForVisibleItems)
         }
     }
@@ -438,8 +455,10 @@ struct ViewerPager: UIViewRepresentable {
             let size = collectionView.bounds.size
             cell.contentConfiguration = UIHostingConfiguration {
                 ViewerPage(item: item, active: item.id == parent.current, chrome: parent.chrome, upcoming: indexPath.item == currentIndex + 1,
-                           poster: parent.poster(item), toggleChrome: parent.toggleChrome, zoomChanged: parent.zoomChanged)
+                           poster: parent.poster(item), insets: parent.insets, toggleChrome: parent.toggleChrome, zoomChanged: parent.zoomChanged)
                     .frame(width: size.width, height: size.height)
+                    // The cell sits under the status bar; its content must not shift away from it.
+                    .ignoresSafeArea()
                     .environmentObject(parent.store)
             }
             .margins(.all, 0)
