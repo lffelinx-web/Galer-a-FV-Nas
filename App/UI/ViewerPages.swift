@@ -322,32 +322,13 @@ struct VideoPage: View {
     }
 
     /// Play or pause, time, position and sound, just above the viewer's bar.
+    /// A slim time bar where the strip of thumbnails goes in photos.
     private var controls: some View {
         VStack {
             Spacer()
-            HStack(spacing: 10) {
-                Button { model.toggle() } label: {
-                    Image(systemName: model.playing ? "pause.fill" : "play.fill").font(.system(size: 17, weight: .semibold)).frame(width: 34, height: 34)
-                }
-                .accessibilityLabel(model.playing ? "Pausa" : "Reproducir")
-                Text(durationText(scrubbing.map { $0 * model.duration } ?? model.time)).font(.caption.monospacedDigit())
-                Slider(value: Binding(get: { scrubbing ?? (model.duration > 0 ? model.time / model.duration : 0) }, set: { scrubbing = $0 }),
-                       onEditingChanged: { editing in
-                           if !editing, let value = scrubbing { model.seek(to: value); scrubbing = nil }
-                       })
-                    .tint(Palette.accent)
-                Text(durationText(model.duration)).font(.caption.monospacedDigit()).foregroundStyle(Palette.secondary)
-                Button { model.muted.toggle() } label: {
-                    Image(systemName: model.muted ? "speaker.slash.fill" : "speaker.wave.2.fill").font(.system(size: 15, weight: .semibold)).frame(width: 34, height: 34)
-                }
-                .accessibilityLabel(model.muted ? "Activar sonido" : "Silenciar")
-            }
-            .foregroundStyle(Palette.ink)
-            .buttonStyle(PressStyle())
-            .padding(.horizontal, 12).frame(height: 48)
-            .liquidCapsule()
-            .padding(.horizontal, 14)
-            .padding(.bottom, 168)
+            VideoBar(playing: model.playing, time: model.time, duration: model.duration, muted: model.muted,
+                     toggle: { model.toggle() }, seek: { model.seek(to: $0) }, mute: { model.muted.toggle() })
+                .padding(.bottom, ViewerMetrics.videoBarBottom)
         }
     }
 
@@ -384,5 +365,91 @@ struct VideoPage: View {
             let last = max(0, (total - 1) / size)
             for index in Set([0, min(1, last), last]) { _ = try? await BlockCache.shared.block(index, of: file, account: account) }
         }.value
+    }
+}
+
+
+// MARK: Video bar
+
+/// Spacing of the viewer's bottom controls, shared by the pages and the bars.
+enum ViewerMetrics {
+    static let barHeight: CGFloat = 48
+    @MainActor static var safeBottom: CGFloat {
+        (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.keyWindow?.safeAreaInsets.bottom ?? 0
+    }
+    /// Just above the action bar, where photos show the thumbnail strip.
+    @MainActor static var videoBarBottom: CGFloat { safeBottom + 4 + barHeight + 12 }
+}
+
+/// Play or pause, the time on both sides of a thin line, and the sound.
+struct VideoBar: View {
+    let playing: Bool
+    let time: Double
+    let duration: Double
+    let muted: Bool?
+    var toggle: () -> Void
+    var seek: (Double) -> Void
+    var mute: () -> Void
+    @State private var scrubbing: Double?
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(action: toggle) {
+                Image(systemName: playing ? "pause.fill" : "play.fill").font(.system(size: 14, weight: .bold)).frame(width: 28, height: 28)
+            }
+            .accessibilityLabel(playing ? "Pausa" : "Reproducir")
+            Text(durationText(scrubbing.map { $0 * duration } ?? time)).font(.caption2.weight(.medium).monospacedDigit())
+            ScrubLine(value: scrubbing ?? (duration > 0 ? time / duration : 0)) { value, done in
+                scrubbing = done ? nil : value
+                if done { seek(value) }
+            }
+            Text(durationText(duration)).font(.caption2.weight(.medium).monospacedDigit()).foregroundStyle(Palette.secondary)
+            if let muted {
+                Button(action: mute) {
+                    Image(systemName: muted ? "speaker.slash.fill" : "speaker.wave.2.fill").font(.system(size: 13, weight: .semibold)).frame(width: 28, height: 28)
+                }
+                .accessibilityLabel(muted ? "Activar sonido" : "Silenciar")
+            }
+        }
+        .foregroundStyle(Palette.ink)
+        .buttonStyle(PressStyle())
+        .padding(.horizontal, 10).frame(height: 38)
+        .liquidCapsule()
+        .padding(.horizontal, 22)
+    }
+}
+
+/// A thin progress line that grows a little while you drag it.
+struct ScrubLine: View {
+    let value: Double
+    var changed: (Double, Bool) -> Void
+    @State private var dragging = false
+
+    var body: some View {
+        GeometryReader { geo in
+            let fraction = min(max(value, 0), 1)
+            ZStack(alignment: .leading) {
+                Capsule().fill(Palette.ink.opacity(0.18))
+                Capsule().fill(Palette.accent).frame(width: max(geo.size.width * fraction, dragging ? 8 : 4))
+            }
+            .frame(height: dragging ? 8 : 4)
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { drag in
+                        if !dragging { withAnimation(.easeOut(duration: 0.15)) { dragging = true } }
+                        changed(min(max(drag.location.x / max(geo.size.width, 1), 0), 1), false)
+                    }
+                    .onEnded { drag in
+                        withAnimation(.easeOut(duration: 0.15)) { dragging = false }
+                        changed(min(max(drag.location.x / max(geo.size.width, 1), 0), 1), true)
+                    }
+            )
+        }
+        .frame(height: 28)
+        .accessibilityElement()
+        .accessibilityLabel("Posición del video")
+        .accessibilityValue("\(Int(value * 100)) %")
     }
 }

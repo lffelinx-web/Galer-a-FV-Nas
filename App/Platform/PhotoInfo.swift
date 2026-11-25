@@ -2,6 +2,7 @@ import Foundation
 import ImageIO
 import Photos
 import CoreLocation
+import AVFoundation
 
 /// What the info panel shows about one photo or video.
 struct PhotoInfo: Equatable {
@@ -15,6 +16,8 @@ struct PhotoInfo: Equatable {
     /// «ƒ/1.8 · 1/120 s · ISO 100 · 26 mm».
     var exposure: String?
     var location: CLLocationCoordinate2D?
+    /// Videos: «HEVC · 30 fps».
+    var video: String?
 
     static func == (lhs: PhotoInfo, rhs: PhotoInfo) -> Bool {
         lhs.fileName == rhs.fileName && lhs.bytes == rhs.bytes && lhs.width == rhs.width && lhs.camera == rhs.camera
@@ -46,14 +49,30 @@ struct PhotoInfo: Equatable {
                 info.bytes = Int64(data.count)
                 info.apply(properties(data))
                 if info.location == nil { info.location = asset.location?.coordinate }
+            } else if asset.mediaType == .video, let movie = await videoAsset(asset) {
+                await info.applyVideo(movie)
             }
         case .nas(let url):
             info.fileName = item.name
             info.bytes = item.bytes
             info.format = url.pathExtension.uppercased()
-            guard let account, item.kind != .video else { return info }
-            if let head = try? await NASTransport(account).range(url, start: 0, count: 524_288, prefix: true).data {
+            guard let account else { return info }
+            if item.kind == .video {
+                if MediaFormat.playable.contains(item.fileExtension),
+                   let stream = try? await StreamServer.shared.url(for: StreamFile(url: url, bytes: item.bytes), account: account) {
+                    await info.applyVideo(AVURLAsset(url: stream))
+                }
+                return info
+            }
+            let transport = NASTransport(account)
+            if let head = try? await transport.range(url, start: 0, count: 524_288, prefix: true).data {
                 info.apply(properties(head))
+            }
+            // Some files (WebP, PNG from apps) keep their size only in the image itself: read
+            // the whole file when it is small.
+            if info.width == nil, (item.bytes ?? .max) <= 20_000_000,
+               let whole = try? await transport.request(url, limit: 20_000_000).data {
+                info.apply(properties(whole))
             }
         }
         return info
@@ -71,9 +90,54 @@ struct PhotoInfo: Equatable {
     }
 
     static func properties(_ data: Data) -> [CFString: Any] {
-        let source = CGImageSourceCreateIncremental(nil)
-        CGImageSourceUpdateData(source, data as CFData, false)
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return [:] }
         return CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] ?? [:]
+    }
+
+    private static func videoAsset(_ asset: PHAsset) async -> AVAsset? {
+        let options = PHVideoRequestOptions()
+        options.isNetworkAccessAllowed = true
+        return await withCheckedContinuation { continuation in
+            PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { movie, _, _ in continuation.resume(returning: movie) }
+        }
+    }
+
+    /// Size, frame rate and codec of the video track.
+    mutating func applyVideo(_ asset: AVAsset) async {
+        guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+              let loaded = try? await track.load(.naturalSize, .preferredTransform, .nominalFrameRate, .formatDescriptions) else { return }
+        let (size, transform, rate, formats) = loaded
+        let shown = CGRect(origin: .zero, size: size).applying(transform)
+        width = Int(abs(shown.width).rounded())
+        height = Int(abs(shown.height).rounded())
+        var parts: [String] = []
+        if let format = formats.first { parts.append(Self.codecName(CMFormatDescriptionGetMediaSubType(format))) }
+        if rate > 0 { parts.append("\(Int(rate.rounded())) fps") }
+        if !parts.isEmpty { video = parts.joined(separator: " · ") }
+    }
+
+    static func codecName(_ code: FourCharCode) -> String {
+        switch code {
+        case kCMVideoCodecType_HEVC, kCMVideoCodecType_HEVCWithAlpha: return "HEVC"
+        case kCMVideoCodecType_H264: return "H.264"
+        case kCMVideoCodecType_AppleProRes422, kCMVideoCodecType_AppleProRes422HQ, kCMVideoCodecType_AppleProRes422LT,
+             kCMVideoCodecType_AppleProRes4444, kCMVideoCodecType_AppleProResRAW: return "ProRes"
+        case kCMVideoCodecType_MPEG4Video: return "MPEG-4"
+        default:
+            let bytes = [24, 16, 8, 0].map { UInt8((code >> $0) & 0xFF) }
+            return String(bytes: bytes, encoding: .ascii)?.trimmingCharacters(in: .whitespaces).uppercased() ?? "Video"
+        }
+    }
+
+    /// «Guadalajara, México» for the viewer's title, quickly: iPhone photos carry their
+    /// place; NAS photos only once their information was opened.
+    @MainActor
+    static func quickPlace(_ item: GalleryItem) async -> String? {
+        if let known = PlaceCache.byItem[item.id] { return known }
+        guard case .phone(let id) = item.source, let coordinate = PhoneLibrary.shared.asset(id)?.location?.coordinate else { return nil }
+        let name = await placeName(coordinate)
+        PlaceCache.byItem[item.id] = name
+        return name
     }
 
     mutating func apply(_ properties: [CFString: Any]) {
@@ -117,12 +181,28 @@ struct PhotoInfo: Equatable {
         return ([side] + detail).joined(separator: " · ")
     }
 
-    /// «Puebla, México».
+    /// «Puebla, México». Nearby photos share one lookup, since Apple limits how many are allowed.
+    @MainActor
     static func placeName(_ coordinate: CLLocationCoordinate2D) async -> String? {
+        let key = String(format: "%.2f,%.2f", coordinate.latitude, coordinate.longitude)
+        if let known = PlaceCache.byArea[key] { return known }
+        let name = await lookUpPlace(coordinate)
+        if let name { PlaceCache.byArea[key] = name }
+        return name
+    }
+
+    private static func lookUpPlace(_ coordinate: CLLocationCoordinate2D) async -> String? {
         let placemarks = try? await CLGeocoder().reverseGeocodeLocation(CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude),
                                                                        preferredLocale: Locale(identifier: "es_MX"))
         guard let place = placemarks?.first else { return nil }
         return [place.subLocality ?? place.locality, place.locality == place.subLocality ? nil : place.locality, place.country]
             .compactMap { $0 }.reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }.joined(separator: ", ")
     }
+}
+
+/// Places already looked up, by photo and by area.
+@MainActor
+enum PlaceCache {
+    static var byItem: [String: String] = [:]
+    static var byArea: [String: String] = [:]
 }

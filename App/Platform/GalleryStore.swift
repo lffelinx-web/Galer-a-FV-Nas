@@ -486,6 +486,18 @@ final class GalleryStore: ObservableObject {
     /// The capture dates stopped before the end (the NAS stopped answering); they can be resumed.
     var datesPaused: Bool { account != nil && datesTask == nil && !scanning && datesRead < nasItems.count && !nasItems.isEmpty }
 
+    /// Where the date of an item comes from, so you know how much to trust it.
+    func dateSource(_ item: GalleryItem) -> String {
+        guard item.isNAS else { return "Fecha de la fototeca del iPhone" }
+        if captured[item.id]?.date != nil { return item.isVideo ? "Fecha guardada en el video" : "Fecha de captura del archivo (EXIF)" }
+        let calendar = Calendar.current
+        let latest = calendar.component(.year, from: Date()) + 1
+        if DateGuess.fromName(item.name, calendar: calendar, latestYear: latest) != nil { return "Fecha tomada del nombre del archivo" }
+        let folders = (item.folder ?? "").split(separator: "/").map(String.init)
+        if DateGuess.fromFolders(folders, calendar: calendar, latestYear: latest) != nil { return "Fecha aproximada por la carpeta" }
+        return "Fecha de modificación en el NAS"
+    }
+
     /// NAS files that were read but carry no capture date.
     var undatedItems: [GalleryItem] {
         captured.compactMap { $0.value.date == nil ? itemIndex[$0.key] : nil }.sorted { $0.date > $1.date }

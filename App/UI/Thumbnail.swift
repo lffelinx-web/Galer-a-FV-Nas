@@ -7,6 +7,8 @@ struct Thumbnail: View {
     let item: GalleryItem
     /// The longer side of the tile, in points.
     var pixelSize: CGFloat
+    /// The play mark and duration of videos; off where tiles are tiny.
+    var badges = true
     @State private var image: UIImage?
     @State private var shown: String?
 
@@ -21,7 +23,7 @@ struct Thumbnail: View {
                 }
             }
             .overlay(alignment: .bottomTrailing) {
-                if item.isVideo {
+                if item.isVideo && badges {
                     HStack(spacing: 3) {
                         Image(systemName: "play.fill").font(.system(size: 8, weight: .bold))
                         if let duration = item.duration { Text(durationText(duration)).font(.system(size: 11, weight: .semibold)).monospacedDigit() }

@@ -131,8 +131,6 @@ struct VLCInlinePlayer: View {
     let muted: Bool
     var toggleChrome: () -> Void
     @StateObject private var controller = VLCController()
-    @State private var scrubbing: Double?
-
     var body: some View {
         ZStack {
             Color.black
@@ -160,26 +158,9 @@ struct VLCInlinePlayer: View {
     private var controls: some View {
         VStack {
             Spacer()
-            HStack(spacing: 10) {
-                Button { controller.togglePlay() } label: {
-                    Image(systemName: controller.playing ? "pause.fill" : "play.fill").font(.system(size: 17, weight: .semibold)).frame(width: 34, height: 34)
-                }
-                .accessibilityLabel(controller.playing ? "Pausa" : "Reproducir")
-                Text(durationText(scrubbing.map { $0 * controller.length } ?? controller.time)).font(.caption.monospacedDigit())
-                Slider(value: Binding(get: { scrubbing ?? (controller.length > 0 ? controller.time / controller.length : 0) },
-                                      set: { scrubbing = $0 }),
-                       onEditingChanged: { editing in
-                           if !editing, let value = scrubbing { controller.seek(to: value); scrubbing = nil }
-                       })
-                    .tint(Palette.accent)
-                Text(durationText(controller.length)).font(.caption.monospacedDigit()).foregroundStyle(Palette.secondary)
-            }
-            .foregroundStyle(Palette.ink)
-            .buttonStyle(PressStyle())
-            .padding(.horizontal, 12).frame(height: 48)
-            .liquidCapsule()
-            .padding(.horizontal, 14)
-            .padding(.bottom, 168)
+            VideoBar(playing: controller.playing, time: controller.time, duration: controller.length, muted: nil,
+                     toggle: { controller.togglePlay() }, seek: { controller.seek(to: $0) }, mute: {})
+                .padding(.bottom, ViewerMetrics.videoBarBottom)
         }
     }
 }

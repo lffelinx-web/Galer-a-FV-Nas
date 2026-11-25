@@ -20,6 +20,7 @@ struct ViewerView: View {
     @State private var shareFile: ShareFile?
     @State private var working: String?
     @State private var toast: String?
+    @State private var places: [String: String] = [:]
     /// 0: the photo sits on its tile; 1: it fills the screen. Animated when opening and closing.
     @State private var progress: CGFloat
     @State private var settled: Bool
@@ -102,6 +103,10 @@ struct ViewerView: View {
         .sheet(item: $albumItem) { AddToAlbumSheet(itemID: $0.id).environmentObject(store) }
         .sheet(item: $shareFile) { ActivitySheet(items: [$0.url]).ignoresSafeArea() }
         .onChange(of: current) { zoomed = false }
+        .task(id: current) {
+            guard let item = currentItem, places[item.id] == nil, let place = await PhotoInfo.quickPlace(item) else { return }
+            places[item.id] = place
+        }
     }
 
     /// The picture the page shows at once: the uncropped one from the tap for the first
@@ -206,7 +211,9 @@ struct ViewerView: View {
             if let item = currentItem {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(Timeline.format(item.date, "d 'de' MMMM 'de' y")).font(.subheadline.weight(.semibold)).lineLimit(1).minimumScaleFactor(0.8)
-                    Text(detail(item)).font(.caption).foregroundStyle(Palette.secondary).lineLimit(1)
+                    // The place when the photo has one, and the time; the folder is in the information.
+                    Text([places[item.id], Timeline.format(item.date, "HH:mm")].compactMap { $0 }.joined(separator: " · "))
+                        .font(.caption).foregroundStyle(Palette.secondary).lineLimit(1)
                 }
                 .foregroundStyle(Palette.ink)
                 .padding(.horizontal, 16).frame(height: 46)
@@ -228,7 +235,8 @@ struct ViewerView: View {
 
     private var bottomBar: some View {
         VStack(spacing: 12) {
-            Filmstrip(items: context.items, current: $current)
+            // Videos show their time bar here instead.
+            if currentItem?.isVideo != true { Filmstrip(items: context.items, current: $current) }
             if let item = currentItem { actions(item) }
         }
         .padding(.bottom, 4)
@@ -239,11 +247,11 @@ struct ViewerView: View {
     private func actions(_ item: GalleryItem) -> some View {
         let favorite = store.isFavorite(item)
         let hidden = store.isHidden(item)
-        let size = MainView.barHeight
+        let size = ViewerMetrics.barHeight
         return GlassGroup(spacing: 14) {
             HStack(spacing: 0) {
                 Button { Task { await share(item) } } label: {
-                    Image(systemName: "square.and.arrow.up").font(.system(size: 20, weight: .semibold)).foregroundStyle(Palette.ink)
+                    Image(systemName: "square.and.arrow.up").font(.system(size: 17, weight: .semibold)).foregroundStyle(Palette.ink)
                         .offset(y: -1)
                         .frame(width: size, height: size).contentShape(Circle())
                         .liquidCircle()
@@ -253,26 +261,26 @@ struct ViewerView: View {
                 Spacer(minLength: 10)
                 HStack(spacing: 4) {
                     Button { store.toggleFavorite(item) } label: {
-                        Label("Favorito", systemImage: favorite ? "heart.fill" : "heart")
+                        Image(systemName: favorite ? "heart.fill" : "heart")
                             .foregroundStyle(favorite ? Color.red : Palette.ink)
                             .symbolEffect(.bounce, value: favorite)
-                            .frame(width: 96, height: size - 10)
+                            .frame(width: 64, height: size - 8)
                             .background { if favorite { Capsule().fill(Color.red.opacity(0.12)) } }
                             .contentShape(Capsule())
                     }
                     .sensoryFeedback(.impact(weight: .light), trigger: favorite)
                     .accessibilityLabel(favorite ? "Quitar de favoritos" : "Agregar a favoritos")
                     Button { setInfo(true) } label: {
-                        Label("Info", systemImage: "info.circle")
+                        Image(systemName: "info.circle")
                             .foregroundStyle(Palette.ink)
-                            .frame(width: 84, height: size - 10)
+                            .frame(width: 64, height: size - 8)
                             .contentShape(Capsule())
                     }
                     .accessibilityLabel("Información")
                 }
-                .labelStyle(BarLabelStyle())
+                .font(.system(size: 18, weight: .semibold))
                 .buttonStyle(PressStyle())
-                .padding(5)
+                .padding(4)
                 .liquidCapsule()
                 Spacer(minLength: 10)
                 Menu {
@@ -289,23 +297,14 @@ struct ViewerView: View {
                         Label(hidden ? "Mostrar en Fototeca" : "Ocultar", systemImage: hidden ? "eye" : "eye.slash")
                     }
                 } label: {
-                    Image(systemName: "ellipsis").font(.system(size: 20, weight: .bold)).foregroundStyle(Palette.ink)
+                    Image(systemName: "ellipsis").font(.system(size: 17, weight: .bold)).foregroundStyle(Palette.ink)
                         .frame(width: size, height: size).contentShape(Circle())
                         .liquidCircle()
                 }
                 .accessibilityLabel("Más")
             }
         }
-        .padding(.horizontal, 14)
-    }
-
-    private func detail(_ item: GalleryItem) -> String {
-        let time = Timeline.format(item.date, "HH:mm")
-        if item.isNAS {
-            let place = item.folder.map { $0.isEmpty ? store.nasLabel : $0 } ?? store.nasLabel
-            return "\(time) · NAS · \(place)"
-        }
-        return "\(time) · iPhone"
+        .padding(.horizontal, 22)
     }
 
     // MARK: Actions
@@ -347,16 +346,6 @@ struct ViewerView: View {
         Task {
             try? await Task.sleep(nanoseconds: 1_800_000_000)
             withAnimation(.easeOut(duration: 0.3)) { toast = nil }
-        }
-    }
-}
-
-/// Icon above a short word, for the middle piece of the viewer's bar.
-struct BarLabelStyle: LabelStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        VStack(spacing: 2) {
-            configuration.icon.font(.system(size: 18, weight: .semibold))
-            configuration.title.font(.system(size: 10.5, weight: .semibold))
         }
     }
 }
@@ -445,9 +434,12 @@ struct ViewerPager: UIViewRepresentable {
             let item = parent.items[indexPath.item]
             let currentIndex = parent.current.flatMap { positions[$0] } ?? 0
             cell.backgroundConfiguration = .clear()
+            // The page gets the exact screen size, so it is laid out once and never shifts.
+            let size = collectionView.bounds.size
             cell.contentConfiguration = UIHostingConfiguration {
                 ViewerPage(item: item, active: item.id == parent.current, chrome: parent.chrome, upcoming: indexPath.item == currentIndex + 1,
                            poster: parent.poster(item), toggleChrome: parent.toggleChrome, zoomChanged: parent.zoomChanged)
+                    .frame(width: size.width, height: size.height)
                     .environmentObject(parent.store)
             }
             .margins(.all, 0)
@@ -514,6 +506,8 @@ final class PagerContainer: UIView {
         collectionView.showsHorizontalScrollIndicator = false
         collectionView.contentInsetAdjustmentBehavior = .never
         collectionView.register(UICollectionViewCell.self, forCellWithReuseIdentifier: "page")
+        // Hidden until it sits on the tapped photo at its final size.
+        collectionView.alpha = 0
         addSubview(collectionView)
     }
 
@@ -525,8 +519,11 @@ final class PagerContainer: UIView {
         guard bounds.size != lastSize, bounds.width > 0 else { return }
         lastSize = bounds.size
         collectionView.collectionViewLayout.invalidateLayout()
+        collectionView.reloadData()
         collectionView.layoutIfNeeded()
         onLayout?()
+        collectionView.layoutIfNeeded()
+        collectionView.alpha = 1
     }
 }
 
@@ -544,11 +541,11 @@ struct Filmstrip: View {
                     ForEach(items) { item in
                         let selected = item.id == current
                         Button { withAnimation(.easeInOut(duration: 0.2)) { current = item.id } } label: {
-                            Thumbnail(item: item, pixelSize: 60)
-                                .frame(width: selected ? 44 : 30, height: 46)
-                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(Color.white, lineWidth: selected ? 2 : 0))
-                                .padding(.horizontal, selected ? 4 : 0)
+                            Thumbnail(item: item, pixelSize: 50, badges: false)
+                                .frame(width: selected ? 34 : 24, height: 38)
+                                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                                .opacity(selected ? 1 : 0.85)
+                                .padding(.horizontal, selected ? 5 : 0)
                         }
                         .buttonStyle(.plain)
                         .id(item.id)
@@ -556,7 +553,7 @@ struct Filmstrip: View {
                 }
                 .padding(.horizontal, 200)
             }
-            .frame(height: 50)
+            .frame(height: 40)
             .onAppear { proxy.scrollTo(current, anchor: .center) }
             .onChange(of: current) { _, value in withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(value, anchor: .center) } }
         }
@@ -582,21 +579,36 @@ struct ActivitySheet: UIViewControllerRepresentable {
 
 // MARK: Information
 
-/// Below the lifted photo: when and where it was taken, with what, the file and its albums.
+/// Below the lifted photo: what it is, when it was taken (and how sure that date is),
+/// with what, the file, the place, where it is kept and its albums. Files without camera
+/// data still show everything that can be read from them.
 struct InfoPanel: View {
     @EnvironmentObject var store: GalleryStore
     let item: GalleryItem
     @State private var info: PhotoInfo?
     @State private var place: String?
+    @State private var showFolder = false
+
+    private var kind: (String, String) {
+        if item.isScreenshot { return ("Captura de pantalla", "camera.viewfinder") }
+        if item.kind == .livePhoto { return ("Live Photo", "livephoto") }
+        if item.isVideo { return ("Video", "video") }
+        if item.isRAW { return ("Foto RAW", "camera.aperture") }
+        return ("Foto", "photo")
+    }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 14) {
                 Capsule().fill(Palette.secondary.opacity(0.35)).frame(width: 38, height: 5).frame(maxWidth: .infinity)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(Timeline.format(item.date, "EEEE d 'de' MMMM 'de' y")).font(.title3.bold()).foregroundStyle(Palette.ink)
                     Text(Timeline.format(item.date, "HH:mm") + (item.duration.map { " · " + durationText($0) } ?? ""))
                         .font(.subheadline).foregroundStyle(Palette.secondary)
+                }
+                group {
+                    row(kind.0, kind.1)
+                    row(store.dateSource(item), "calendar.badge.clock", secondary: true)
                 }
                 if let info {
                     if info.camera != nil || info.lens != nil || info.exposure != nil {
@@ -608,9 +620,11 @@ struct InfoPanel: View {
                     }
                     group {
                         if let name = info.fileName { row(name, "doc") }
-                        let details = [info.format.flatMap { $0.isEmpty ? nil : $0 }, info.resolution,
+                        if let resolution = info.resolution { row(resolution, "aspectratio") }
+                        let details = [info.format.flatMap { $0.isEmpty ? nil : $0 },
                                        info.bytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }].compactMap { $0 }
-                        if !details.isEmpty { row(details.joined(separator: " · "), "photo") }
+                        if !details.isEmpty { row(details.joined(separator: " · "), "internaldrive") }
+                        if let video = info.video { row(video, "film") }
                     }
                     if let location = info.location {
                         VStack(alignment: .leading, spacing: 8) {
@@ -628,6 +642,11 @@ struct InfoPanel: View {
                 group {
                     if item.isNAS {
                         row(store.nasLabel + " · " + ((item.folder?.isEmpty ?? true) ? "carpeta principal" : item.folder!), "server.rack")
+                        Button { showFolder = true } label: {
+                            Label("Ver carpeta", systemImage: "folder")
+                                .font(.subheadline.weight(.semibold)).foregroundStyle(Palette.accent)
+                        }
+                        if store.duplicateIDs.contains(item.id) { row("También está en este iPhone", "iphone", secondary: true) }
                     } else {
                         row("Este iPhone", "iphone")
                     }
@@ -642,12 +661,16 @@ struct InfoPanel: View {
         }
         .scrollIndicators(.hidden)
         .background(Palette.background, in: UnevenRoundedRectangle(topLeadingRadius: 28, topTrailingRadius: 28, style: .continuous))
+        .sheet(isPresented: $showFolder) { FolderSheet(folder: item.folder ?? "").environmentObject(store) }
         .task(id: item.id) {
             info = nil
             place = nil
             let loaded = await PhotoInfo.load(item, account: store.account)
             info = loaded
-            if let location = loaded.location { place = await PhotoInfo.placeName(location) }
+            if let location = loaded.location {
+                place = await PhotoInfo.placeName(location)
+                if let place { PlaceCache.byItem[item.id] = place }
+            }
         }
     }
 
@@ -658,12 +681,36 @@ struct InfoPanel: View {
             .background(Color.white.opacity(0.85), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    private func row(_ text: String, _ symbol: String) -> some View {
+    private func row(_ text: String, _ symbol: String, secondary: Bool = false) -> some View {
         Label {
-            Text(text).foregroundStyle(Palette.ink).fixedSize(horizontal: false, vertical: true)
+            Text(text).foregroundStyle(secondary ? Palette.secondary : Palette.ink).fixedSize(horizontal: false, vertical: true)
         } icon: {
             Image(systemName: symbol).foregroundStyle(Palette.accent)
         }
-        .font(.subheadline)
+        .font(secondary ? .footnote : .subheadline)
+    }
+}
+
+/// «Ver carpeta»: everything in the same NAS folder.
+struct FolderSheet: View {
+    @EnvironmentObject var store: GalleryStore
+    @Environment(\.dismiss) private var dismiss
+    let folder: String
+
+    var body: some View {
+        let items = store.nasShown.filter { ($0.folder ?? "") == folder }
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(mediaSummary(items)).font(.footnote).foregroundStyle(Palette.secondary)
+                    SquareGrid(items: items)
+                }
+                .padding(.horizontal, 16)
+            }
+            .background(AppBackground())
+            .navigationTitle(folder.split(separator: "/").last.map(String.init) ?? "Carpeta principal")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Listo") { dismiss() } } }
+        }
     }
 }
