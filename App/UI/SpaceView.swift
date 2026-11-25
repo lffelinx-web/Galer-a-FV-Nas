@@ -133,6 +133,7 @@ struct SpaceView: View {
     @State private var showHidden = false
     @State private var query = ""
     @State private var lockMessage: String?
+    @State private var selectedYear: Int?
 
     var body: some View {
         NavigationStack {
@@ -145,6 +146,7 @@ struct SpaceView: View {
                     .padding(.top, 8)
                     SearchField(text: $query)
                     if query.trimmingCharacters(in: .whitespaces).isEmpty {
+                        if backup.enabled { BackupCard(backup: backup) }
                         if !stats.memories.isEmpty { memories }
                         if !favorites.isEmpty { favoritesSection }
                         albumsSection
@@ -324,57 +326,66 @@ struct SpaceView: View {
     // MARK: Summary
 
     private var summary: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .firstTextBaseline, spacing: 24) {
-                number(stats.photos, "fotos")
-                number(stats.videos, "videos")
-                Spacer(minLength: 0)
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text((stats.photos + stats.videos).formatted())
+                    .font(.system(size: 40, weight: .bold)).foregroundStyle(Palette.ink).monospacedDigit()
+                Text("\(stats.photos.formatted()) fotos · \(stats.videos.formatted()) videos")
+                    .font(.subheadline).foregroundStyle(Palette.secondary)
             }
-            HStack(spacing: 16) {
-                Label(stats.phone.formatted(), systemImage: "iphone")
-                Label(stats.nas.formatted(), systemImage: "server.rack")
-            }
-            .font(.subheadline.weight(.medium)).foregroundStyle(Palette.secondary)
 
-            if let space = store.nasSpace, let used = space.used, let total = space.total, total > 0 {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    source("iphone", "iPhone", stats.phone)
+                    source("server.rack", store.nasLabel, stats.nas)
+                }
+                if store.duplicatesHidden > 0 {
+                    Text("\(store.duplicatesHidden.formatted()) están en ambos y se muestran una vez")
+                        .font(.footnote).foregroundStyle(Palette.secondary)
+                }
+            }
+
+            if let space = store.nasSpace, let used = space.used, let available = space.available, let total = space.total, total > 0 {
+                let low = Double(available) / Double(total) < 0.05
                 VStack(alignment: .leading, spacing: 6) {
-                    ProgressView(value: Double(used), total: Double(total)).tint(Palette.accent)
-                    Text("\(store.nasLabel): \(store.spaceText ?? "")").font(.footnote).foregroundStyle(Palette.secondary)
+                    HStack {
+                        Text(store.nasLabel).font(.footnote.weight(.semibold)).foregroundStyle(Palette.ink)
+                        Spacer()
+                        Text(store.spaceText ?? "").font(.footnote).foregroundStyle(Palette.secondary)
+                    }
+                    ProgressView(value: Double(used), total: Double(total)).tint(low ? Palette.warning : Palette.accent)
+                    if low {
+                        Label("Queda poco espacio en el NAS", systemImage: "exclamationmark.triangle.fill")
+                            .font(.footnote.weight(.semibold)).foregroundStyle(Palette.warning)
+                    }
                 }
             }
 
             if !stats.years.isEmpty { yearsChart }
 
-            if store.account != nil {
+            // Only while they are being read; once ready there is nothing to show.
+            if store.account != nil && store.datesRead < store.nasItems.count {
                 VStack(alignment: .leading, spacing: 6) {
-                    let total = max(store.nasItems.count, 1)
                     HStack {
                         Text("Fechas de captura").font(.footnote.weight(.semibold)).foregroundStyle(Palette.ink)
                         Spacer()
-                        Text(store.datesRead >= store.nasItems.count ? "Listas" : "\(store.datesRead.formatted()) de \(store.nasItems.count.formatted())")
-                            .font(.footnote).foregroundStyle(Palette.secondary)
+                        Text("\(store.datesRead.formatted()) de \(store.nasItems.count.formatted())").font(.footnote).foregroundStyle(Palette.secondary)
                     }
-                    if store.datesRead < store.nasItems.count {
-                        ProgressView(value: Double(store.datesRead), total: Double(total)).tint(Palette.accent)
-                    }
-                    if store.duplicatesHidden > 0 {
-                        Text("\(store.duplicatesHidden.formatted()) fotos del NAS ya están en este iPhone y se muestran una vez.")
-                            .font(.footnote).foregroundStyle(Palette.secondary)
-                    }
-                }
-            }
-
-            if backup.enabled {
-                HStack(spacing: 8) {
-                    Image(systemName: "arrow.up.to.line.circle").foregroundStyle(Palette.accent)
-                    Text("Respaldo").font(.footnote.weight(.semibold)).foregroundStyle(Palette.ink)
-                    Spacer()
-                    if backup.running { ProgressView().controlSize(.mini) }
-                    Text(backup.summary).font(.footnote).foregroundStyle(Palette.secondary).lineLimit(1).minimumScaleFactor(0.8)
+                    ProgressView(value: Double(store.datesRead), total: Double(max(store.nasItems.count, 1))).tint(Palette.accent)
                 }
             }
         }
         .card()
+    }
+
+    private func source(_ symbol: String, _ title: String, _ count: Int) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(title, systemImage: symbol).font(.footnote.weight(.semibold)).foregroundStyle(Palette.secondary).lineLimit(1)
+            Text(count.formatted()).font(.title3.weight(.bold)).foregroundStyle(Palette.ink).monospacedDigit()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Palette.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private func number(_ value: Int, _ unit: String) -> some View {
@@ -384,28 +395,43 @@ struct SpaceView: View {
         }
     }
 
-    /// Photos per year, as small bars.
+    /// Items per year as bars; the current year stands out and a touch shows the count.
     private var yearsChart: some View {
         let highest = max(stats.years.map(\.count).max() ?? 1, 1)
-        return ScrollView(.horizontal, showsIndicators: false) {
-            HStack(alignment: .bottom, spacing: 8) {
-                ForEach(stats.years, id: \.year) { entry in
-                    VStack(spacing: 4) {
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .fill(Palette.selection)
-                            .frame(width: 22, height: max(4, 70 * CGFloat(entry.count) / CGFloat(highest)))
-                        Text("’" + String(String(entry.year).suffix(2))).font(.caption2).foregroundStyle(Palette.secondary)
-                    }
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("\(entry.year): \(entry.count.formatted()) fotos")
-                }
+        let thisYear = Calendar.current.component(.year, from: Date())
+        let shown = selectedYear.flatMap { year in stats.years.first { $0.year == year } }
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Por año").font(.footnote.weight(.semibold)).foregroundStyle(Palette.ink)
+                Spacer()
+                Text(shown.map { "\($0.year): \($0.count.formatted())" } ?? "Toca un año")
+                    .font(.footnote).foregroundStyle(Palette.secondary).monospacedDigit()
             }
-            .frame(height: 92, alignment: .bottom)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .bottom, spacing: 8) {
+                    ForEach(stats.years, id: \.year) { entry in
+                        let strong = entry.year == (selectedYear ?? thisYear)
+                        Button {
+                            withAnimation(.easeOut(duration: 0.2)) { selectedYear = selectedYear == entry.year ? nil : entry.year }
+                        } label: {
+                            VStack(spacing: 4) {
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .fill(Palette.selection.opacity(strong ? 1 : 0.45))
+                                    .frame(width: 22, height: max(4, 70 * CGFloat(entry.count) / CGFloat(highest)))
+                                Text("’" + String(String(entry.year).suffix(2)))
+                                    .font(.caption2.weight(strong ? .semibold : .regular))
+                                    .foregroundStyle(strong ? Palette.ink : Palette.secondary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("\(entry.year): \(entry.count.formatted())")
+                    }
+                }
+                .frame(height: 92, alignment: .bottom)
+            }
+            .defaultScrollAnchor(.trailing)
         }
-        .defaultScrollAnchor(.trailing)
     }
-
-
 
     /// Face ID (or the passcode) opens the hidden album.
     private func unlock() async {

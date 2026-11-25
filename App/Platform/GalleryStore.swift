@@ -481,6 +481,33 @@ final class GalleryStore: ObservableObject {
         }
     }
 
+    /// Photos the backup just copied: on the NAS tab right away, on the day they were taken,
+    /// without waiting for the next search. In Fototeca they are recognized as the copy of
+    /// the iPhone photo and shown once.
+    func addBackedUp(_ files: [BackedUpFile], folder: String, date: Date, aspect: Double, duration: Double?) {
+        guard let account, files.contains(where: { URLPolicy.allowed($0.url, root: account.root) }) else { return }
+        let known = Set(nasItems.lazy.map(\.id))
+        var added: [GalleryItem] = []
+        for file in files where URLPolicy.allowed(file.url, root: account.root) {
+            guard let kind = MediaFormat.kind(ofExtension: file.url.pathExtension) else { continue }
+            let id = "n:" + file.url.absoluteString
+            let info = CaptureInfo(date: date, aspect: aspect, duration: kind == .video ? duration : nil)
+            if captured[id] == nil { datesRead += 1 }
+            captured[id] = info
+            guard !known.contains(id) else { continue }
+            added.append(GalleryItem(id: id, source: .nas(file.url), date: date, kind: kind, aspect: aspect, duration: info.duration,
+                                     name: file.name, bytes: file.bytes, folder: folder))
+        }
+        saveCaptured()
+        added = NASScanner.removeLivePhotoVideos(added)
+        guard !added.isEmpty else { return }
+        nasItems = (added + nasItems).sorted { $0.date == $1.date ? $0.id < $1.id : $0.date > $1.date }
+        let (items, scanned, recent, folders, name) = (nasItems, lastScan, lastAdded, folderCache, indexName)
+        let version = needsFullScan ? 1 : 2
+        Task.detached(priority: .utility) { try? Files.save(NASIndex(items: items, scanned: scanned, added: recent, folders: folders, version: version), name: name) }
+        merge()
+    }
+
     /// Reorders the NAS by the dates read since the last time, if any.
     func applyReadDates() async {
         guard capturedDirty else { return }

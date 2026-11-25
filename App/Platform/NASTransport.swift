@@ -36,11 +36,12 @@ final class NASTransport: @unchecked Sendable {
     /// `bodyFile` sends a file from disk as the body, a piece at a time (the backup). Statuses
     /// in `accept` come back as a response instead of an error, without their body.
     func request(_ url: URL, method: String = "GET", headers: [String: String] = [:], body: Data = Data(), bodyFile: URL? = nil,
-                 accept: Set<Int> = [], limit: Int = 2_000_000, allowPrefix: Bool = false) async throws -> NASResponse {
+                 accept: Set<Int> = [], limit: Int = 2_000_000, allowPrefix: Bool = false,
+                 sent: (@Sendable (Int64) -> Void)? = nil) async throws -> NASResponse {
 
         try await NASRouteFallback.perform(account: account) { route in
             var response = try await requestOnRoute(url, route: route, method: method, headers: headers, body: body, bodyFile: bodyFile, accept: accept,
-                                                    limit: limit, allowPrefix: allowPrefix)
+                                                    limit: limit, allowPrefix: allowPrefix, sent: sent)
             response.route = route
             NotificationCenter.default.post(name: .nasRequestSucceeded, object: nil, userInfo: ["scope": account.scope])
             return response
@@ -50,7 +51,7 @@ final class NASTransport: @unchecked Sendable {
     /// Tries a connection kept open from an earlier request first; a stale one (closed by
     /// the NAS while idle) is replaced by a new connection once.
     private func requestOnRoute(_ url: URL, route: String, method: String, headers: [String: String], body: Data, bodyFile: URL?, accept: Set<Int>,
-                                limit: Int, allowPrefix: Bool) async throws -> NASResponse {
+                                limit: Int, allowPrefix: Bool, sent: (@Sendable (Int64) -> Void)?) async throws -> NASResponse {
         let dsm = URLPolicy.allowedDSM(url, account: account)
         // Writing is only allowed inside the backup folder, and a move only to a name there
         // that does not exist yet (`Overwrite: F`).
@@ -65,7 +66,7 @@ final class NASTransport: @unchecked Sendable {
         if let pooled = NASConnectionPool.shared.take(key) {
             do {
                 return try await exchange(url, pooled: pooled, key: key, host: host, port: port, route: route, method: method, headers: headers, body: body,
-                                          bodyFile: bodyFile, accept: accept, limit: limit, allowPrefix: allowPrefix, dsm: dsm)
+                                          bodyFile: bodyFile, accept: accept, limit: limit, allowPrefix: allowPrefix, dsm: dsm, progress: sent)
             } catch let error as URLError where error.code == .networkConnectionLost {
                 // The NAS closed it while it waited; continue with a fresh one.
             } catch let error as NWError {
@@ -73,7 +74,7 @@ final class NASTransport: @unchecked Sendable {
             }
         }
         return try await exchange(url, pooled: nil, key: key, host: host, port: port, route: route, method: method, headers: headers, body: body,
-                                  bodyFile: bodyFile, accept: accept, limit: limit, allowPrefix: allowPrefix, dsm: dsm)
+                                  bodyFile: bodyFile, accept: accept, limit: limit, allowPrefix: allowPrefix, dsm: dsm, progress: sent)
     }
 
     private func connect(host: String, port: NWEndpoint.Port, route: String) async throws -> PooledConnection {
@@ -113,7 +114,8 @@ final class NASTransport: @unchecked Sendable {
     }
 
     private func exchange(_ url: URL, pooled: PooledConnection?, key: String, host: String, port: NWEndpoint.Port, route: String, method: String,
-                          headers: [String: String], body: Data, bodyFile: URL?, accept: Set<Int>, limit: Int, allowPrefix: Bool, dsm: Bool) async throws -> NASResponse {
+                          headers: [String: String], body: Data, bodyFile: URL?, accept: Set<Int>, limit: Int, allowPrefix: Bool, dsm: Bool,
+                          progress: (@Sendable (Int64) -> Void)?) async throws -> NASResponse {
         let link: PooledConnection
         if let pooled { link = pooled } else { link = try await connect(host: host, port: port, route: route) }
         let connection = link.connection, reader = link.reader
@@ -165,6 +167,7 @@ final class NASTransport: @unchecked Sendable {
                     guard let piece = try file.read(upToCount: 262_144), !piece.isEmpty else { throw GalleryError.message("El archivo cambió mientras se subía.") }
                     try await send(piece)
                     sent += Int64(piece.count)
+                    progress?(sent)
                     timeout.arm(35)
                 }
                 // The NAS may take a moment to store a large file before answering.
