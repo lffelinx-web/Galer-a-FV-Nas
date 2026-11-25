@@ -616,11 +616,42 @@ final class GalleryStore: ObservableObject {
 
     func isHidden(_ item: GalleryItem) -> Bool { hidden.contains(item.id) }
 
-    func setHidden(_ item: GalleryItem, _ value: Bool) {
-        if value { hidden.insert(item.id) } else { hidden.remove(item.id) }
+    func setHidden(_ item: GalleryItem, _ value: Bool) { setHidden([item], value) }
+
+    func setHidden(_ items: [GalleryItem], _ value: Bool) {
+        for item in items { if value { hidden.insert(item.id) } else { hidden.remove(item.id) } }
         save(hidden, as: hiddenName)
         merge()
     }
+
+    /// Several at once: all become favorites, or (when all already are) none.
+    func setFavorite(_ items: [GalleryItem], _ value: Bool) {
+        for item in items where isFavorite(item) != value { toggleFavoriteSilently(item) }
+        save(favorites, as: favoritesName)
+    }
+
+    private func toggleFavoriteSilently(_ item: GalleryItem) {
+        if isFavorite(item) {
+            favorites.remove(item.id)
+            if item.favorite { favorites.insert("-" + item.id) }
+        } else {
+            favorites.remove("-" + item.id)
+            if !item.favorite { favorites.insert(item.id) }
+        }
+    }
+
+    // MARK: Selection
+
+    /// Photos chosen in the mosaic; nil when not choosing.
+    @Published var selection: Set<String>?
+
+    func toggleSelection(_ id: String) {
+        guard var current = selection else { return }
+        if current.contains(id) { current.remove(id) } else { current.insert(id) }
+        selection = current
+    }
+
+    var selectedItems: [GalleryItem] { (selection ?? []).compactMap { itemIndex[$0] }.sorted { $0.date > $1.date } }
 
     var hiddenItems: [GalleryItem] { hidden.compactMap { itemIndex[$0] }.sorted { $0.date > $1.date } }
 
@@ -692,6 +723,18 @@ final class GalleryStore: ObservableObject {
         guard let index = albums.firstIndex(where: { $0.id == id }) else { return }
         if let position = albums[index].items.firstIndex(of: itemID) { albums[index].items.remove(at: position) }
         else { albums[index].items.insert(itemID, at: 0) }
+        saveAlbums()
+    }
+
+    /// Puts several photos in an album, or takes them out.
+    func set(_ itemIDs: [String], in id: UUID, _ inside: Bool) {
+        guard let index = albums.firstIndex(where: { $0.id == id }) else { return }
+        if inside {
+            albums[index].items.insert(contentsOf: itemIDs.filter { !albums[index].items.contains($0) }, at: 0)
+        } else {
+            let removed = Set(itemIDs)
+            albums[index].items.removeAll { removed.contains($0) }
+        }
         saveAlbums()
     }
 

@@ -67,6 +67,16 @@ struct PhotoWall<Header: View, Empty: View>: View {
                                        onScroll(distance, user)
                                    },
                                    onSelect: select,
+                                   selection: store.selection,
+                                   onLongPress: { id in
+                                       // Holding a photo starts choosing several.
+                                       withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { store.selection = [id] }
+                                   },
+                                   onPinch: { closer in
+                                       // Two fingers apart: closer (finer scale); together: farther.
+                                       guard let next = closer ? scale.finer : scale.coarser else { return }
+                                       scale = next
+                                   },
                                    refresh: refresh)
                         .ignoresSafeArea()
                     WallHeader(scroll: scroll) { header() }
@@ -128,7 +138,7 @@ struct PhotoWall<Header: View, Empty: View>: View {
     private func select(_ element: WallElement, from frame: CGRect?, image: UIImage?) {
         switch element.kind {
         case .tile(let item, _):
-            store.open(item, in: items, from: frame, image: image)
+            if store.selection != nil { store.toggleSelection(item.id) } else { store.open(item, in: items, from: frame, image: image) }
         case .header:
             break
         case .card(let section):
@@ -272,6 +282,11 @@ struct CollectionWall: UIViewRepresentable {
     var control: WallControl
     var onScroll: (CGFloat, Bool) -> Void
     var onSelect: (WallElement, CGRect?, UIImage?) -> Void
+    /// The chosen photos while choosing several; nil otherwise.
+    var selection: Set<String>?
+    var onLongPress: (String) -> Void
+    /// True when the fingers move apart.
+    var onPinch: (Bool) -> Void
     var refresh: () async -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -292,6 +307,11 @@ struct CollectionWall: UIViewRepresentable {
         view.refreshControl = refresher
         context.coordinator.lastTopRequest = topRequest
         control.collectionView = view
+        let pinch = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.pinched(_:)))
+        view.addGestureRecognizer(pinch)
+        let hold = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.held(_:)))
+        hold.minimumPressDuration = 0.4
+        view.addGestureRecognizer(hold)
         return container
     }
 
@@ -334,6 +354,10 @@ struct CollectionWall: UIViewRepresentable {
                 } completion: { _ in snapshot.removeFromSuperview() }
             }
         }
+        if coordinator.lastSelection != selection {
+            coordinator.lastSelection = selection
+            view.reconfigureItems(at: view.indexPathsForVisibleItems)
+        }
         if coordinator.lastTopRequest != topRequest {
             coordinator.lastTopRequest = topRequest
             view.setContentOffset(CGPoint(x: 0, y: -view.adjustedContentInset.top), animated: true)
@@ -344,6 +368,7 @@ struct CollectionWall: UIViewRepresentable {
         var parent: CollectionWall
         var layoutID = -1
         var lastTopRequest = 0
+        var lastSelection: Set<String>?
         /// True while the wall itself moves the content, so it is not taken for a gesture.
         var moving = false
 
@@ -365,9 +390,14 @@ struct CollectionWall: UIViewRepresentable {
             switch element.kind {
             case .tile(let item, let corner):
                 let side = max(element.frame.width, element.frame.height)
+                let selection = parent.selection
                 cell.contentConfiguration = UIHostingConfiguration {
                     Thumbnail(item: item, pixelSize: side)
                         .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+                        .overlay(alignment: .bottomTrailing) {
+                            if let selection { SelectionMark(selected: selection.contains(item.id)) }
+                        }
+                        .opacity(selection.map { $0.contains(item.id) ? 0.75 : 1 } ?? 1)
                 }
                 .margins(.all, 0)
             case .header(let section):
@@ -421,6 +451,29 @@ struct CollectionWall: UIViewRepresentable {
             if let collectionView = scrollView as? UICollectionView { parent.tracker.topDate = wall(collectionView).date(at: distance + 20) }
             let user = !moving && (scrollView.isDragging || scrollView.isDecelerating)
             parent.onScroll(distance, user)
+        }
+
+        @objc func held(_ gesture: UILongPressGestureRecognizer) {
+            guard gesture.state == .began, parent.selection == nil, let view = gesture.view as? UICollectionView,
+                  let indexPath = view.indexPathForItem(at: gesture.location(in: view)) else { return }
+            let elements = wall(view).elements
+            guard indexPath.item < elements.count, case .tile(let item, _) = elements[indexPath.item].kind else { return }
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            parent.onLongPress(item.id)
+        }
+
+        private var pinchHandled = false
+
+        /// One change of scale per pinch, once the fingers moved far enough.
+        @objc func pinched(_ gesture: UIPinchGestureRecognizer) {
+            switch gesture.state {
+            case .began: pinchHandled = false
+            case .changed:
+                guard !pinchHandled else { return }
+                if gesture.scale > 1.3 { pinchHandled = true; parent.onPinch(true) }
+                else if gesture.scale < 0.75 { pinchHandled = true; parent.onPinch(false) }
+            default: break
+            }
         }
 
         @objc func refreshPulled(_ control: UIRefreshControl) {
@@ -700,8 +753,8 @@ struct PeriodCard: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(Color.white, lineWidth: 1))
+        .background(Palette.card, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(Palette.cardStroke, lineWidth: 1))
         .shadow(color: Palette.accent.opacity(0.07), radius: 10, y: 4)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(section.title), \(summary)")
@@ -752,5 +805,20 @@ struct PeriodCard: View {
             index += 1
         }
         return picks
+    }
+}
+
+/// The circle on a tile while choosing several: empty, or filled with a check.
+struct SelectionMark: View {
+    let selected: Bool
+    var body: some View {
+        ZStack {
+            Circle().fill(selected ? Palette.accent : Color.black.opacity(0.2))
+            Circle().stroke(Color.white, lineWidth: 1.5)
+            if selected { Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(.white) }
+        }
+        .frame(width: 22, height: 22)
+        .padding(6)
+        .accessibilityHidden(true)
     }
 }

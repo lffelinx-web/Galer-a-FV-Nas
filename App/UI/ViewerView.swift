@@ -678,7 +678,7 @@ struct InfoPanel: View {
         VStack(alignment: .leading, spacing: 10, content: content)
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.white.opacity(0.85), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .background(Palette.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private func row(_ text: String, _ symbol: String, secondary: Bool = false) -> some View {

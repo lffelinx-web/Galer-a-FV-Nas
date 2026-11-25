@@ -4,13 +4,15 @@ import SwiftUI
 struct LFAZGaleriaApp: App {
     @StateObject private var store = GalleryStore()
     @Environment(\.scenePhase) private var scenePhase
+    /// «system», «light» or «dark», from Configuración.
+    @AppStorage("appearance") private var appearance = "system"
 
     var body: some Scene {
         WindowGroup {
             MainView()
                 .environmentObject(store)
                 .tint(Palette.accent)
-                .preferredColorScheme(.light)
+                .preferredColorScheme(appearance == "light" ? .light : appearance == "dark" ? .dark : nil)
                 .task { await store.start() }
                 .alert("No se pudo completar", isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) {
                     Button("Aceptar", role: .cancel) { store.error = nil }

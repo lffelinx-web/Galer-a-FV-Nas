@@ -1,16 +1,28 @@
 import SwiftUI
 
+/// The app's colors, each with a light and a dark version that follow the iPhone (or the
+/// appearance chosen in Configuración).
 enum Palette {
-    static let background = Color(red: 0.93, green: 0.95, blue: 0.99)
-    static let backgroundBottom = Color(red: 0.97, green: 0.98, blue: 1.0)
-    static let ink = Color(red: 0.08, green: 0.11, blue: 0.18)
-    static let secondary = Color(red: 0.36, green: 0.40, blue: 0.48)
-    static let accent = Color(red: 0.18, green: 0.42, blue: 0.91)
-    static let accentLight = Color(red: 0.36, green: 0.62, blue: 1.0)
-    static let tile = Color(red: 0.86, green: 0.89, blue: 0.95)
+    private static func dynamic(_ light: (CGFloat, CGFloat, CGFloat, CGFloat), _ dark: (CGFloat, CGFloat, CGFloat, CGFloat)) -> Color {
+        Color(UIColor { traits in
+            let c = traits.userInterfaceStyle == .dark ? dark : light
+            return UIColor(red: c.0, green: c.1, blue: c.2, alpha: c.3)
+        })
+    }
+
+    static let background = dynamic((0.93, 0.95, 0.99, 1), (0.05, 0.06, 0.09, 1))
+    static let backgroundBottom = dynamic((0.97, 0.98, 1.0, 1), (0.02, 0.03, 0.05, 1))
+    static let ink = dynamic((0.08, 0.11, 0.18, 1), (0.93, 0.95, 0.98, 1))
+    static let secondary = dynamic((0.36, 0.40, 0.48, 1), (0.62, 0.66, 0.74, 1))
+    static let accent = dynamic((0.18, 0.42, 0.91, 1), (0.36, 0.58, 1.0, 1))
+    static let accentLight = dynamic((0.36, 0.62, 1.0, 1), (0.48, 0.70, 1.0, 1))
+    static let tile = dynamic((0.86, 0.89, 0.95, 1), (0.14, 0.16, 0.21, 1))
     static let online = Color(red: 0.20, green: 0.78, blue: 0.35)
     static let warning = Color(red: 0.98, green: 0.62, blue: 0.15)
-    static let stroke = Color.white.opacity(0.7)
+    static let stroke = dynamic((1, 1, 1, 0.7), (1, 1, 1, 0.12))
+    /// Cards on the background: white in light mode, a raised dark gray in dark mode.
+    static let card = dynamic((1, 1, 1, 0.8), (0.11, 0.12, 0.16, 0.92))
+    static let cardStroke = dynamic((1, 1, 1, 1), (1, 1, 1, 0.07))
 
     static var selection: LinearGradient {
         LinearGradient(colors: [accentLight, accent], startPoint: .top, endPoint: .bottom)
@@ -98,8 +110,8 @@ struct NASBadge: View {
 struct CardStyle: ViewModifier {
     func body(content: Content) -> some View {
         content.padding(16).frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.white.opacity(0.75), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(Color.white, lineWidth: 1))
+            .background(Palette.card, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(Palette.cardStroke, lineWidth: 1))
             .shadow(color: Palette.accent.opacity(0.06), radius: 12, y: 4)
     }
 }

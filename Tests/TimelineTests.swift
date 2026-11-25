@@ -289,3 +289,35 @@ final class DSMTests: XCTestCase {
         XCTAssertEqual(space?.total, 4_000_000_000_000)
     }
 }
+
+final class SearchTests: XCTestCase {
+    private var calendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        return calendar
+    }
+
+    private func item(_ id: String, _ y: Int, _ m: Int, _ d: Int, kind: MediaKind = .photo, name: String = "IMG.jpg", folder: String? = nil) -> GalleryItem {
+        GalleryItem(id: id, source: folder == nil ? .phone(id) : .nas(URL(string: "https://nas.example.com/p/\(id)")!),
+                    date: calendar.date(from: DateComponents(year: y, month: m, day: d, hour: 12))!, kind: kind,
+                    aspect: 1, duration: nil, name: name, bytes: nil, folder: folder)
+    }
+
+    func testWordsCombine() {
+        let items = [
+            item("a", 2023, 5, 14, folder: "Viajes/Oaxaca"),
+            item("b", 2023, 5, 20, kind: .video),
+            item("c", 2024, 5, 14),
+            item("d", 2023, 8, 1, name: "Screenshot_2023.png")
+        ]
+        func ids(_ query: String) -> [String] { Search.run(query, in: items, favorites: { $0.id == "c" }, calendar: calendar).map(\.id) }
+        XCTAssertEqual(ids("mayo 2023"), ["a", "b"])
+        XCTAssertEqual(ids("videos"), ["b"])
+        XCTAssertEqual(ids("14 de mayo"), ["a", "c"])
+        XCTAssertEqual(ids("oaxaca"), ["a"])
+        XCTAssertEqual(ids("capturas"), ["d"])
+        XCTAssertEqual(ids("favoritos"), ["c"])
+        XCTAssertEqual(ids("Mayo, 2024"), ["c"])
+        XCTAssertTrue(ids("   ").isEmpty)
+    }
+}

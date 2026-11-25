@@ -9,6 +9,7 @@ struct SettingsView: View {
     @State private var route = ""
     @State private var tailscale = ""
     @State private var dsmPort = ""
+    @AppStorage("appearance") private var appearance = "system"
     @State private var connectionMode = NASConnectionMode.automatic
     @State private var cacheSize = "—"
     @State private var saved = false
@@ -83,6 +84,14 @@ struct SettingsView: View {
                     }
                     .disabled(store.connecting || !changed || address.isEmpty || user.isEmpty || password.isEmpty)
                 }
+
+                Section {
+                    Picker("Apariencia", selection: $appearance) {
+                        Text("Como el iPhone").tag("system")
+                        Text("Claro").tag("light")
+                        Text("Oscuro").tag("dark")
+                    }
+                } header: { Text("Pantalla") }
 
                 Section {
                     Toggle("Fotos del iPhone", isOn: $store.showPhone)

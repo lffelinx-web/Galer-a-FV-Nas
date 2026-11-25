@@ -60,12 +60,37 @@ struct MainView: View {
                     .opacity(showCompact ? 1 : 0)
             }
             .overlay(alignment: .bottom) {
-                bar
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, geo.safeAreaInsets.bottom > 0 ? 0 : 12)
-                    // A little closer to the edge than the safe area, without touching it.
-                    .offset(y: geo.safeAreaInsets.bottom > 0 ? 8 : 0)
+                Group {
+                    if store.selection != nil {
+                        SelectionBar().transition(.move(edge: .bottom).combined(with: .opacity))
+                    } else {
+                        bar
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, geo.safeAreaInsets.bottom > 0 ? 0 : 12)
+                // A little closer to the edge than the safe area, without touching it.
+                .offset(y: geo.safeAreaInsets.bottom > 0 ? 8 : 0)
             }
+            .overlay(alignment: .top) {
+                if let selection = store.selection {
+                    HStack {
+                        Text(selection.isEmpty ? "Elige fotos" : countText(selection.count, "seleccionada", "seleccionadas"))
+                            .font(.headline).foregroundStyle(Palette.ink)
+                            .padding(.horizontal, 16).frame(height: 44)
+                            .liquidCapsule()
+                        Spacer()
+                        Button("Cancelar") { withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { store.selection = nil } }
+                            .font(.headline).foregroundStyle(Palette.accent)
+                            .padding(.horizontal, 16).frame(height: 44)
+                            .liquidCapsule()
+                            .buttonStyle(PressStyle())
+                    }
+                    .padding(.horizontal, 14)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .animation(.spring(response: 0.35, dampingFraction: 0.85), value: store.selection == nil)
         }
         .fullScreenCover(item: $store.viewer) { ViewerView(context: $0).environmentObject(store) }
         .onChange(of: store.dayRequest) { _, request in
@@ -114,6 +139,7 @@ struct MainView: View {
     }
 
     private func select(_ item: AppTab) {
+        store.selection = nil
         if item == tab {
             scrollToTop()
             return
@@ -199,4 +225,83 @@ struct ScaleSwitcher: View {
         .fixedSize(horizontal: true, vertical: false)
         .sensoryFeedback(.selection, trigger: scale)
     }
+}
+
+
+/// While choosing several photos: share them, add them to an album, mark them as favorites
+/// or hide them, all at once.
+struct SelectionBar: View {
+    @EnvironmentObject var store: GalleryStore
+    @State private var albumIDs: [String]?
+    @State private var shareFiles: [URL]?
+    @State private var working: String?
+
+    var body: some View {
+        let items = store.selectedItems
+        let allFavorite = !items.isEmpty && items.allSatisfy(store.isFavorite)
+        HStack(spacing: 0) {
+            button("square.and.arrow.up", "Compartir") { Task { await share(items) } }
+            button("rectangle.stack.badge.plus", "Álbum") { albumIDs = items.map(\.id) }
+            button(allFavorite ? "heart.fill" : "heart", allFavorite ? "Quitar" : "Favorito") {
+                store.setFavorite(items, !allFavorite)
+            }
+            button("eye.slash", "Ocultar") {
+                store.setHidden(items, true)
+                store.selection = nil
+            }
+        }
+        .disabled(items.isEmpty || working != nil)
+        .opacity(items.isEmpty ? 0.5 : 1)
+        .padding(.horizontal, 6)
+        .frame(height: MainView.barHeight)
+        .liquidCapsule()
+        .overlay {
+            if let working {
+                HStack(spacing: 8) { ProgressView(); Text(working).font(.footnote.weight(.semibold)) }
+                    .padding(.horizontal, 14).frame(height: 36)
+                    .background(.regularMaterial, in: Capsule())
+                    .offset(y: -MainView.barHeight)
+            }
+        }
+        .sheet(item: Binding(get: { albumIDs.map(IDList.init) }, set: { albumIDs = $0?.ids })) {
+            AddToAlbumSheet(itemIDs: $0.ids).environmentObject(store)
+        }
+        .sheet(item: Binding(get: { shareFiles.map(FileList.init) }, set: { shareFiles = $0?.urls })) {
+            ActivitySheet(items: $0.urls).ignoresSafeArea()
+        }
+    }
+
+    private func button(_ symbol: String, _ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 2) {
+                Image(systemName: symbol).font(.system(size: 18, weight: .semibold))
+                Text(title).font(.system(size: 10.5, weight: .semibold))
+            }
+            .foregroundStyle(Palette.ink)
+            .frame(maxWidth: .infinity).frame(height: MainView.barHeight - 10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle())
+    }
+
+    /// The originals, one by one (NAS ones are downloaded), then the share sheet with all.
+    private func share(_ items: [GalleryItem]) async {
+        var files: [URL] = []
+        for (index, item) in items.enumerated() {
+            working = "Preparando \(index + 1) de \(items.count)…"
+            if let file = try? await ItemExport.file(for: item, account: store.account) { files.append(file) }
+        }
+        working = nil
+        if files.isEmpty { store.error = "No se pudieron preparar las fotos." } else { shareFiles = files }
+    }
+}
+
+private struct IDList: Identifiable {
+    let ids: [String]
+    var id: String { ids.joined(separator: ",") }
+}
+
+private struct FileList: Identifiable {
+    let urls: [URL]
+    var id: String { urls.map(\.path).joined(separator: ",") }
 }

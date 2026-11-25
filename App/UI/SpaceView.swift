@@ -128,6 +128,7 @@ struct SpaceView: View {
     @State private var stats = SpaceStats()
     @State private var favorites: [GalleryItem] = []
     @State private var showHidden = false
+    @State private var query = ""
     @State private var lockMessage: String?
 
     var body: some View {
@@ -139,12 +140,17 @@ struct SpaceView: View {
                         Text("Tu biblioteca personal").font(.subheadline).foregroundStyle(Palette.secondary)
                     }
                     .padding(.top, 8)
-                    if !stats.memories.isEmpty { memories }
-                    if !favorites.isEmpty { favoritesSection }
-                    albumsSection
-                    collections
-                    utilities
-                    section("Resumen") { summary }
+                    SearchField(text: $query)
+                    if query.trimmingCharacters(in: .whitespaces).isEmpty {
+                        if !stats.memories.isEmpty { memories }
+                        if !favorites.isEmpty { favoritesSection }
+                        albumsSection
+                        collections
+                        utilities
+                        section("Resumen") { summary }
+                    } else {
+                        SearchResults(query: query)
+                    }
                 }
                 .padding(.horizontal, 16)
             }
@@ -306,8 +312,8 @@ struct SpaceView: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.white, lineWidth: 1))
+        .background(Palette.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Palette.cardStroke, lineWidth: 1))
     }
 
     // MARK: Summary
@@ -561,8 +567,12 @@ struct AlbumDetailView: View {
 struct AddToAlbumSheet: View {
     @EnvironmentObject var store: GalleryStore
     @Environment(\.dismiss) private var dismiss
-    let itemID: String
+    /// One photo from the viewer, or several from a selection.
+    let itemIDs: [String]
     @State private var newName = ""
+
+    init(itemID: String) { itemIDs = [itemID] }
+    init(itemIDs: [String]) { self.itemIDs = itemIDs }
 
     var body: some View {
         NavigationStack {
@@ -571,7 +581,7 @@ struct AddToAlbumSheet: View {
                     HStack {
                         TextField("Nuevo álbum", text: $newName)
                         Button("Crear") {
-                            store.createAlbum(newName, with: [itemID])
+                            store.createAlbum(newName, with: itemIDs)
                             newName = ""
                         }
                         .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -580,11 +590,12 @@ struct AddToAlbumSheet: View {
                 if !store.albums.isEmpty {
                     Section("Mis álbumes") {
                         ForEach(store.albums) { album in
-                            Button { store.toggle(itemID, in: album.id) } label: {
+                            let inside = itemIDs.allSatisfy(album.items.contains)
+                            Button { store.set(itemIDs, in: album.id, !inside) } label: {
                                 HStack {
                                     Text(album.name).foregroundStyle(Palette.ink)
                                     Spacer()
-                                    if album.items.contains(itemID) { Image(systemName: "checkmark.circle.fill").foregroundStyle(Palette.accent) }
+                                    if inside { Image(systemName: "checkmark.circle.fill").foregroundStyle(Palette.accent) }
                                     else { Image(systemName: "circle").foregroundStyle(Palette.secondary.opacity(0.5)) }
                                 }
                             }
@@ -592,10 +603,74 @@ struct AddToAlbumSheet: View {
                     }
                 }
             }
-            .navigationTitle("Agregar a álbum")
+            .navigationTitle(itemIDs.count > 1 ? "Agregar \(itemIDs.count) a álbum" : "Agregar a álbum")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Listo") { dismiss() } } }
         }
         .presentationDetents([.medium, .large])
+    }
+}
+
+
+// MARK: Search
+
+/// «Buscar»: a glass field at the top of Espacio.
+struct SearchField: View {
+    @Binding var text: String
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundStyle(Palette.secondary)
+            TextField("Buscar: «mayo 2023», «videos», una carpeta…", text: $text)
+                .focused($focused)
+                .submitLabel(.search)
+                .autocorrectionDisabled()
+                .foregroundStyle(Palette.ink)
+            if !text.isEmpty {
+                Button { text = ""; focused = false } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(Palette.secondary)
+                }
+                .accessibilityLabel("Borrar búsqueda")
+            }
+        }
+        .padding(.horizontal, 14).frame(height: 46)
+        .liquidCapsule(interactive: true)
+    }
+}
+
+/// What the search finds, with quick ideas when nothing matches.
+struct SearchResults: View {
+    @EnvironmentObject var store: GalleryStore
+    let query: String
+    @State private var results: [GalleryItem]?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let results {
+                if results.isEmpty {
+                    EmptyState(symbol: "magnifyingglass", title: "Sin resultados",
+                               message: "Prueba con un año («2023»), un mes («mayo»), «videos», «capturas», «favoritos» o parte del nombre de una carpeta.")
+                } else {
+                    Text(mediaSummary(results)).font(.footnote).foregroundStyle(Palette.secondary)
+                    SquareGrid(items: results, columns: 4)
+                }
+            } else {
+                ProgressView().frame(maxWidth: .infinity).padding(30)
+            }
+        }
+        .task(id: query) {
+            // Waits for a pause in typing before searching tens of thousands of photos.
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            let all = store.allVisible.sorted { $0.date > $1.date }
+            let favorites = store.favorites
+            let text = query
+            let found = await Task.detached(priority: .userInitiated) {
+                Search.run(text, in: all) { item in favorites.contains(item.id) || (item.favorite && !favorites.contains("-" + item.id)) }
+            }.value
+            guard !Task.isCancelled else { return }
+            results = found
+        }
     }
 }

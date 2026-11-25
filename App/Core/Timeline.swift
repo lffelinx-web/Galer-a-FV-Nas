@@ -5,6 +5,9 @@ enum TimeScale: String, CaseIterable, Identifiable {
     case days, months, years
     var id: String { rawValue }
     var title: String { switch self { case .days: return "Días"; case .months: return "Meses"; case .years: return "Años" } }
+    /// Pinching in shows more per screen: Días → Meses → Años.
+    var coarser: TimeScale? { switch self { case .days: return .months; case .months: return .years; case .years: return nil } }
+    var finer: TimeScale? { switch self { case .days: return nil; case .months: return .days; case .years: return .months } }
 }
 
 struct TimelineSection: Identifiable, Equatable {
