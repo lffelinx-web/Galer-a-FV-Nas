@@ -791,12 +791,12 @@ struct PeriodCard: View {
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
-    /// Favorites first, then photos spread evenly across the period.
+    /// Photos spread evenly across the period.
     static func highlights(_ items: [GalleryItem], count: Int) -> [GalleryItem] {
         let photos = items.filter { !$0.isVideo }
         let pool = photos.isEmpty ? items : photos
         guard pool.count > count else { return pool }
-        var picks = Array(pool.filter(\.favorite).prefix(1))
+        var picks: [GalleryItem] = []
         let step = Double(pool.count) / Double(count)
         var index = 0
         while picks.count < count && index < count * 2 {

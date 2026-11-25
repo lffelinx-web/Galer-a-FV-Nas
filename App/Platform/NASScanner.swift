@@ -90,9 +90,10 @@ struct NASScanner {
                 pending.append((entry.url, folders + [entry.name], entry.modified))
             } else if let kind = entry.kind {
                 let id = "n:" + entry.url.absoluteString
-                let date = DateGuess.date(fileName: entry.name, folders: folders) ?? entry.modified ?? Date(timeIntervalSince1970: 0)
-                result.items.append(GalleryItem(id: id, source: .nas(entry.url), date: date, kind: kind, aspect: learnedAspects[id] ?? 1,
-                                                duration: nil, name: entry.name, bytes: entry.bytes, folder: folders.joined(separator: "/")))
+                let guess = DateGuess.resolve(fileName: entry.name, folders: folders, modified: entry.modified)
+                result.items.append(GalleryItem(id: id, source: .nas(entry.url), date: guess.date ?? Date(timeIntervalSince1970: 0), kind: kind,
+                                                aspect: learnedAspects[id] ?? 1, duration: nil, name: entry.name, bytes: entry.bytes,
+                                                folder: folders.joined(separator: "/"), exactDate: guess.exact ? true : nil))
             }
         }
         return hasSubfolders

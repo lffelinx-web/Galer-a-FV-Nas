@@ -162,7 +162,7 @@ extension GalleryItem {
         self.init(id: "p:" + asset.localIdentifier, source: .phone(asset.localIdentifier),
                   date: asset.creationDate ?? asset.modificationDate ?? Date(timeIntervalSince1970: 0), kind: kind,
                   aspect: asset.pixelHeight > 0 ? Double(asset.pixelWidth) / Double(asset.pixelHeight) : 1,
-                  duration: asset.mediaType == .video ? asset.duration : nil, name: "", bytes: nil, folder: nil, favorite: asset.isFavorite,
+                  duration: asset.mediaType == .video ? asset.duration : nil, name: "", bytes: nil, folder: nil, favorite: false,
                   screenshot: asset.mediaSubtypes.contains(.photoScreenshot))
     }
 }

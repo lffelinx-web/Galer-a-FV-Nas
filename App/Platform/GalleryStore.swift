@@ -137,6 +137,7 @@ final class GalleryStore: ObservableObject {
     private var lastSpaceCheck = Date.distantPast
     private var folderCache: [String: CachedFolder] = [:]
     private var failedChecks = 0
+    private var needsFullScan = false
 
     private var indexName: String { "nas-" + String(Files.key(account?.scope ?? "none").prefix(16)) + ".json" }
     private var aspectsName: String { "aspects-" + String(Files.key(account?.scope ?? "none").prefix(16)) + ".json" }
@@ -152,7 +153,8 @@ final class GalleryStore: ObservableObject {
         ActiveAccount.current = account
         photoAccess = PhoneLibrary.access
         albums = Files.load(albumsName, as: [AppAlbum].self) ?? []
-        favorites = Files.load(favoritesName, as: Set<String>.self) ?? []
+        // Older versions kept «-id» marks to unmark iPhone favorites; no longer needed.
+        favorites = (Files.load(favoritesName, as: Set<String>.self) ?? []).filter { !$0.hasPrefix("-") }
         hidden = Files.load(hiddenName, as: Set<String>.self) ?? []
         if account != nil { nasState = .checking }
         // Photos posts many changes in a row (iCloud, edits); wait for them to settle.
@@ -206,7 +208,7 @@ final class GalleryStore: ObservableObject {
     /// A quick search for new photos when the last one is more than six hours old; it only
     /// lists the folders that changed. Otherwise the capture dates continue.
     private func searchIfStale() {
-        if let lastScan, Date().timeIntervalSince(lastScan) < 6 * 3600 { readCaptureDates() } else { scan(quiet: true) }
+        if !needsFullScan, let lastScan, Date().timeIntervalSince(lastScan) < 6 * 3600 { readCaptureDates() } else { scan(quiet: true) }
     }
 
     /// Pull to refresh: the iPhone library and the NAS connection. A full NAS search is
@@ -349,7 +351,8 @@ final class GalleryStore: ObservableObject {
                 nasItems = found; lastScan = scannedAt; nasState = .connected; scanStatus = nil
                 let addedIDs = lastAdded
                 folderCache = folders
-                Task.detached(priority: .utility) { try? Files.save(NASIndex(items: scanned, scanned: scannedAt, added: addedIDs, folders: folders), name: name) }
+                needsFullScan = false
+                Task.detached(priority: .utility) { try? Files.save(NASIndex(items: scanned, scanned: scannedAt, added: addedIDs, folders: folders, version: 2), name: name) }
                 merge()
                 scanning = false
                 readCaptureDates()
@@ -403,6 +406,9 @@ final class GalleryStore: ObservableObject {
         lastScan = index.scanned
         lastAdded = index.added ?? []
         folderCache = index.folders ?? [:]
+        // Made before dates came from the NAS files: every folder is listed again once.
+        needsFullScan = !index.items.isEmpty && (index.version ?? 0) < 2
+        if needsFullScan { folderCache = [:] }
         merge()
     }
 
@@ -532,14 +538,22 @@ final class GalleryStore: ObservableObject {
         let calendar = Calendar.current
         let latest = calendar.component(.year, from: Date()) + 1
         if DateGuess.fromName(item.name, calendar: calendar, latestYear: latest) != nil { return "Fecha tomada del nombre del archivo" }
+        if item.exactDate == true { return "Fecha del archivo en el NAS" }
         let folders = (item.folder ?? "").split(separator: "/").map(String.init)
         if DateGuess.fromFolders(folders, calendar: calendar, latestYear: latest) != nil { return "Fecha aproximada por la carpeta" }
         return "Fecha de modificación en el NAS"
     }
 
-    /// NAS files that were read but carry no capture date.
+    /// NAS files whose date is only a guess: nothing inside the file, no date in the name,
+    /// and a NAS date that does not match the folder.
     var undatedItems: [GalleryItem] {
-        captured.compactMap { $0.value.date == nil ? itemIndex[$0.key] : nil }.sorted { $0.date > $1.date }
+        let calendar = Calendar.current
+        let latest = calendar.component(.year, from: Date()) + 1
+        return captured.compactMap { entry -> GalleryItem? in
+            guard entry.value.date == nil, let item = itemIndex[entry.key], item.exactDate != true,
+                  DateGuess.fromName(item.name, calendar: calendar, latestYear: latest) == nil else { return nil }
+            return item
+        }.sorted { $0.date > $1.date }
     }
 
     nonisolated static func applying(_ captured: [String: CaptureInfo], to items: [GalleryItem]) -> [GalleryItem] {
@@ -559,7 +573,8 @@ final class GalleryStore: ObservableObject {
     private func merge() {
         let phone = phoneItems, nas = nasItems
         let (usePhone, useNAS, dedupe, secret) = (showPhone, showNAS, hideDuplicates, hidden)
-        let checked = Set(captured.compactMap { $0.value.date == nil ? nil : $0.key })
+        // Exact dates: read from the file, or the NAS date confirmed by the folder.
+        let checked = Set(captured.compactMap { $0.value.date == nil ? nil : $0.key }).union(nas.lazy.filter { $0.exactDate == true }.map(\.id))
         mergeTask?.cancel()
         mergeTask = Task {
             let (merged, index, duplicates, nasVisible) = await Task.detached(priority: .userInitiated) { () -> ([GalleryItem], [String: GalleryItem], [String], [GalleryItem]) in
@@ -637,17 +652,11 @@ final class GalleryStore: ObservableObject {
 
     // MARK: Favorites and hidden
 
-    func isFavorite(_ item: GalleryItem) -> Bool { favorites.contains(item.id) || (item.favorite && !favorites.contains("-" + item.id)) }
+    /// Favorites belong to the app only: the iPhone's favorites play no part.
+    func isFavorite(_ item: GalleryItem) -> Bool { favorites.contains(item.id) }
 
-    /// Favorites live in the app; an iPhone favorite can be unmarked here without touching the library.
     func toggleFavorite(_ item: GalleryItem) {
-        if isFavorite(item) {
-            favorites.remove(item.id)
-            if item.favorite { favorites.insert("-" + item.id) }
-        } else {
-            favorites.remove("-" + item.id)
-            if !item.favorite { favorites.insert(item.id) }
-        }
+        toggleFavoriteSilently(item)
         save(favorites, as: favoritesName)
     }
 
@@ -672,13 +681,7 @@ final class GalleryStore: ObservableObject {
     }
 
     private func toggleFavoriteSilently(_ item: GalleryItem) {
-        if isFavorite(item) {
-            favorites.remove(item.id)
-            if item.favorite { favorites.insert("-" + item.id) }
-        } else {
-            favorites.remove("-" + item.id)
-            if !item.favorite { favorites.insert(item.id) }
-        }
+        if favorites.contains(item.id) { favorites.remove(item.id) } else { favorites.insert(item.id) }
     }
 
     // MARK: Selection

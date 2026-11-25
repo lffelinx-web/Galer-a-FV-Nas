@@ -51,4 +51,19 @@ final class DateGuessTests: XCTestCase {
     func testNameWinsOverFolder() {
         XCTAssertEqual(guess("IMG_20230514_101530.jpg", ["2010"]), [2023, 5, 14, 10, 15])
     }
+
+    func testNASDateWhenFolderAgrees() {
+        let taken = calendar.date(from: DateComponents(year: 2026, month: 11, day: 22, hour: 18, minute: 23))!
+        // Synology backup: «MobileBackup/iPhone/2026/11» with the moment it was taken.
+        let backup = DateGuess.resolve(fileName: "IMG_9845.JPG", folders: ["MobileBackup", "iPhone", "2026", "11"], modified: taken, calendar: calendar, now: now)
+        XCTAssertEqual(parts(backup.date), [2026, 11, 22, 18, 23]); XCTAssertTrue(backup.exact)
+        // Copied years later: the folder says the month, the NAS date is the copy.
+        let copied = DateGuess.resolve(fileName: "IMG_1.JPG", folders: ["2019", "05"], modified: taken, calendar: calendar, now: now)
+        XCTAssertEqual(parts(copied.date), [2019, 5, 1, 12, 0]); XCTAssertFalse(copied.exact)
+        // A year folder accepts any month of that year.
+        XCTAssertTrue(DateGuess.resolve(fileName: "IMG_2.JPG", folders: ["2026"], modified: taken, calendar: calendar, now: now).exact)
+        // No folder hint: the NAS date, not marked exact.
+        let plain = DateGuess.resolve(fileName: "IMG_3.JPG", folders: ["Varios"], modified: taken, calendar: calendar, now: now)
+        XCTAssertEqual(parts(plain.date), [2026, 11, 22, 18, 23]); XCTAssertFalse(plain.exact)
+    }
 }

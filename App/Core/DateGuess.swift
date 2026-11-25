@@ -22,6 +22,21 @@ enum DateGuess {
         return fromFolders(folders, calendar: calendar, latestYear: latest)
     }
 
+    /// The date of a NAS file without reading it, and whether it is exact. The date of the
+    /// file on the NAS is trusted when the folder agrees with it (`2026/11` and 22 November):
+    /// Synology's iPhone backup gives each file the date it was taken. A folder alone only
+    /// says the month, so it is used when the file date does not fit (copied years later).
+    static func resolve(fileName: String, folders: [String], modified: Date?, calendar: Calendar = .current, now: Date = Date()) -> (date: Date?, exact: Bool) {
+        let latest = calendar.component(.year, from: now) + 1
+        if let date = fromName(fileName, calendar: calendar, latestYear: latest) { return (date, false) }
+        guard let folder = folderGuess(folders, calendar: calendar, latestYear: latest) else { return (modified, false) }
+        if let modified {
+            let a = calendar.dateComponents([.year, .month], from: modified), b = calendar.dateComponents([.year, .month], from: folder.date)
+            if a.year == b.year && (!folder.month || a.month == b.month) { return (modified, true) }
+        }
+        return (folder.date, false)
+    }
+
     static func fromName(_ name: String, calendar: Calendar, latestYear: Int) -> Date? {
         let range = NSRange(name.startIndex..., in: name)
         for match in nameExpression.matches(in: name, range: range) {
@@ -36,20 +51,25 @@ enum DateGuess {
     }
 
     static func fromFolders(_ folders: [String], calendar: Calendar, latestYear: Int) -> Date? {
+        folderGuess(folders, calendar: calendar, latestYear: latestYear)?.date
+    }
+
+    /// `month` is false when the folders only name a year.
+    static func folderGuess(_ folders: [String], calendar: Calendar, latestYear: Int) -> (date: Date, month: Bool)? {
         // The deepest folder that names a year wins: `Fotos/2023/05 Mayo` → May 2023.
         for (index, folder) in folders.enumerated().reversed() {
             let range = NSRange(folder.startIndex..., in: folder)
             if let match = yearMonthExpression.firstMatch(in: folder, range: range),
                let y = Range(match.range(at: 1), in: folder), let m = Range(match.range(at: 2), in: folder),
                let year = Int(folder[y]), let month = Int(folder[m]), (1990...latestYear).contains(year) {
-                return make(year, month, 1, 12, 0, 0, calendar: calendar)
+                return make(year, month, 1, 12, 0, 0, calendar: calendar).map { ($0, true) }
             }
             guard let match = yearExpression.firstMatch(in: folder, range: range), let y = Range(match.range(at: 1), in: folder),
                   let year = Int(folder[y]), (1990...latestYear).contains(year) else { continue }
             let rest = folder[y.upperBound...]
             let next = index + 1 < folders.count ? folders[index + 1] : ""
             let monthNumber = Self.month(in: String(rest)) ?? Self.month(in: next)
-            return make(year, monthNumber ?? 1, 1, 12, 0, 0, calendar: calendar)
+            return make(year, monthNumber ?? 1, 1, 12, 0, 0, calendar: calendar).map { ($0, monthNumber != nil) }
         }
         return nil
     }

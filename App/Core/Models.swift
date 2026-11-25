@@ -59,6 +59,8 @@ struct GalleryItem: Identifiable, Hashable, Codable {
     var favorite = false
     /// Set for iPhone screenshots; NAS files are recognized by name.
     var screenshot: Bool?
+    /// A NAS file whose date on the NAS matches its folder: the moment it was taken.
+    var exactDate: Bool?
 
     var isVideo: Bool { kind == .video }
     var isNAS: Bool { if case .nas = source { return true } else { return false } }
@@ -80,6 +82,8 @@ struct NASIndex: Codable {
     var added: [String]?
     /// Each folder as it was, so the next search can skip the unchanged ones.
     var folders: [String: CachedFolder]?
+    /// 2: dates from the NAS file when the folder agrees. Older indexes are searched again in full.
+    var version: Int?
 }
 
 enum GalleryError: LocalizedError {

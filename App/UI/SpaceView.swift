@@ -20,7 +20,7 @@ enum SmartCollection: String, Hashable, CaseIterable, Identifiable {
         case .selfies: return "Selfies"
         case .duplicates: return "Duplicados"
         case .recent: return "Agregadas recientemente"
-        case .undated: return "Sin fecha de captura"
+        case .undated: return "Fecha aproximada"
         }
     }
 
@@ -42,7 +42,7 @@ enum SmartCollection: String, Hashable, CaseIterable, Identifiable {
         switch self {
         case .duplicates: return "Fotos del NAS que también están en este iPhone. En Fototeca se muestran una sola vez."
         case .recent: return "Lo nuevo de la última búsqueda en el NAS y lo último agregado al iPhone."
-        case .undated: return "Archivos del NAS sin fecha de captura dentro del archivo; se ordenan por su nombre, carpeta o fecha de modificación."
+        case .undated: return "Archivos del NAS sin fecha dentro del archivo y cuya fecha en el NAS no coincide con su carpeta; se ordenan por la carpeta o por la fecha del NAS."
         default: return nil
         }
     }
@@ -182,7 +182,7 @@ struct SpaceView: View {
         let (phone, nas, hidden, favoriteIDs) = (store.phoneItems, store.nasItems, store.hidden, store.favorites)
         var result = await Task.detached(priority: .utility) {
             SpaceStats.count(phone: phone, nas: nas, hidden: hidden) { item in
-                favoriteIDs.contains(item.id) || (item.favorite && !favoriteIDs.contains("-" + item.id))
+                favoriteIDs.contains(item.id)
             }
         }.value
         result.counts[.duplicates] = store.duplicateIDs.count
@@ -300,7 +300,7 @@ struct SpaceView: View {
         section("Utilidades") {
             HStack(spacing: 10) {
                 NavigationLink(value: SmartCollection.duplicates) { chip("Duplicados", "square.on.square", stats.counts[.duplicates]) }
-                NavigationLink(value: SmartCollection.undated) { chip("Sin fecha", "calendar.badge.exclamationmark", stats.counts[.undated]) }
+                NavigationLink(value: SmartCollection.undated) { chip("Aproximada", "calendar.badge.exclamationmark", stats.counts[.undated]) }
                 Button { Task { await unlock() } } label: { chip("Oculto", "lock.fill", nil) }
             }
             .buttonStyle(PressStyle())
@@ -682,7 +682,7 @@ struct SearchResults: View {
             let favorites = store.favorites
             let text = query
             let found = await Task.detached(priority: .userInitiated) {
-                Search.run(text, in: all) { item in favorites.contains(item.id) || (item.favorite && !favorites.contains("-" + item.id)) }
+                Search.run(text, in: all) { item in favorites.contains(item.id) }
             }.value
             guard !Task.isCancelled else { return }
             results = found
