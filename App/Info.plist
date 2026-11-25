@@ -50,6 +50,14 @@
 	<string>LF’AZ Galería guarda en tu iPhone las fotos del NAS que tú eliges con «Guardar en el iPhone».</string>
 	<key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
 	<true/>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.lfaz.galeria.trabajo</string>
+	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>processing</string>
+	</array>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 </dict>

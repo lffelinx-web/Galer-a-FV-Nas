@@ -113,7 +113,7 @@ struct MainView: View {
         case .library: LibraryView(scale: $libraryScale, compact: $compact, topRequest: libraryTop, jump: libraryJump,
                                    openSettings: { select(.settings) }, openNAS: { select(.nas) })
         case .nas: NASView(scale: $nasScale, compact: $compact, topRequest: nasTop, jump: nasJump, openSettings: { select(.settings) })
-        case .albums: SpaceView()
+        case .albums: SpaceView(visible: tab == .albums)
         case .settings: SettingsView()
         }
     }

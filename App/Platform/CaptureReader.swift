@@ -12,7 +12,7 @@ struct CaptureInfo: Codable, Equatable {
 /// when photos were taken instead of when they were copied. Photos keep it in EXIF near
 /// the start; videos keep it in the `mvhd` box, at the start or at the end of the file.
 enum CaptureReader {
-    static let headBytes = 262_144
+    static let headBytes = 65_536
     static let moreBytes = 2_097_152
 
     /// Nil when the NAS could not be reached, so the file is tried again later.
@@ -22,6 +22,16 @@ enum CaptureReader {
             let head = try await transport.range(url, start: 0, count: headBytes, prefix: true).data
             if item.kind == .video {
                 if let info = movie(head) { return info }
+                // Usually the date is in the `moov` box after the video data: jump to it.
+                let bytes = [UInt8](head)
+                var next = MediaBoxes.nextTopLevelOffset(bytes)
+                var hops = 0
+                while let offset = next, hops < 3, offset + 8 < UInt64(item.bytes ?? Int64.max) {
+                    hops += 1
+                    let chunk = [UInt8](try await transport.range(url, start: Int64(offset), count: headBytes, prefix: true).data)
+                    if MediaBoxes.topType(chunk) == "moov", let info = movie(Data(chunk)) { return info }
+                    next = MediaBoxes.nextTopLevelOffset(chunk, base: offset)
+                }
                 if let size = item.bytes, size > Int64(headBytes) {
                     let start = max(Int64(0), size - Int64(moreBytes))
                     let tail = try await transport.range(url, start: start, count: Int(size - start), prefix: true).data
@@ -30,6 +40,16 @@ enum CaptureReader {
                 return CaptureInfo()
             }
             if let info = image(head), info.date != nil { return info }
+            // HEIC: the start says where the EXIF block is; read only that.
+            let bytes = [UInt8](head)
+            if let place = MediaBoxes.heifExifLocation(bytes), place.length > 8, place.length < 262_144 {
+                let exif = [UInt8](try await transport.range(url, start: Int64(place.offset), count: Int(place.length), prefix: true).data)
+                if let found = MediaBoxes.exifDate(heifItem: exif) {
+                    var info = CaptureInfo(date: exifDate(found.date, offset: found.offset))
+                    if let size = MediaBoxes.heifSize(bytes) { info.aspect = Double(size.width) / Double(size.height) }
+                    if info.date != nil { return info }
+                }
+            }
             // HEIC and RAW files can keep their metadata further in.
             if head.count >= headBytes, (item.bytes ?? Int64(moreBytes)) > Int64(headBytes) {
                 let more = try await transport.range(url, start: 0, count: moreBytes, prefix: true).data
@@ -146,6 +166,4 @@ enum CaptureReader {
     }
 }
 
-private extension Array {
-    subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil }
-}
+

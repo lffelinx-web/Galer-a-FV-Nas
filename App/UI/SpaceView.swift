@@ -123,6 +123,8 @@ struct SpaceStats {
 /// collections and tools, and the numbers at the end.
 struct SpaceView: View {
     @EnvironmentObject var store: GalleryStore
+    /// Counting tens of thousands of photos only makes sense while Espacio is on screen.
+    var visible = true
     @State private var naming = false
     @State private var newName = ""
     @State private var stats = SpaceStats()
@@ -169,7 +171,9 @@ struct SpaceView: View {
             .alert("No se pudo abrir", isPresented: Binding(get: { lockMessage != nil }, set: { if !$0 { lockMessage = nil } })) {
                 Button("Aceptar", role: .cancel) {}
             } message: { Text(lockMessage ?? "") }
-            .task(id: "\(store.revision)-\(store.favorites.count)-\(store.hidden.count)") { await count() }
+            .task(id: "\(visible)-\(store.revision)-\(store.favorites.count)-\(store.hidden.count)") {
+                if visible { await count() }
+            }
         }
     }
 

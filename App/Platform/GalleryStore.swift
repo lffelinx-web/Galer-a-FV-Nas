@@ -130,6 +130,9 @@ final class GalleryStore: ObservableObject {
     private var learnedAspects: [String: Double] = [:]
     private var captured: [String: CaptureInfo] = [:]
     private var datesTask: Task<Void, Never>?
+    private var datesToken: UUID?
+    /// Dates were read that the wall does not reflect yet.
+    private var capturedDirty = false
     private var lastStatusUpdate = Date.distantPast
     private var lastSpaceCheck = Date.distantPast
     private var folderCache: [String: CachedFolder] = [:]
@@ -141,6 +144,8 @@ final class GalleryStore: ObservableObject {
     private let albumsName = "albums.json"
     private let favoritesName = "favorites.json"
     private let hiddenName = "hidden.json"
+
+    static let shared = GalleryStore()
 
     init() {
         account = AccountKeychain.load()
@@ -217,10 +222,13 @@ final class GalleryStore: ObservableObject {
         if nasState == .connected { searchIfStale() }
     }
 
-    /// Going to the background: keep what was read so far.
+    /// Going to the background: keep what was read so far, put the NAS in date order, and
+    /// ask iOS for time later to keep reading.
     func suspend() async {
         await saveLearned()
         saveCaptured()
+        BackgroundJobs.schedule()
+        await applyReadDates()
     }
 
     // MARK: iPhone
@@ -419,23 +427,30 @@ final class GalleryStore: ObservableObject {
         datesRead = total - pending.count
         guard !pending.isEmpty else { datesStatus = nil; return }
         datesStatus = datesText(datesRead, total)
+        let token = UUID()
+        datesToken = token
         datesTask = Task {
             let background = BackgroundWork(name: "Fechas de captura")
             defer { background.end() }
             let transport = NASTransport(account)
-            var failures = 0, sinceSave = 0, sinceReorder = 0
+            var failures = 0, sinceSave = 0
             var read = self.datesRead
-            var lastReorder = Date()
             var start = 0
+            // Stopped (by a search, or iOS ending the background time): keep what was read.
+            defer {
+                if datesToken == token {
+                    saveCaptured()
+                    datesRead = read
+                    datesStatus = nil
+                    datesTask = nil
+                }
+            }
             while start < pending.count, !Task.isCancelled {
-                // Background work waits while you look at photos or thumbnails are loading,
-                // so the NAS answers what is on screen first.
-                while !Task.isCancelled {
-                    let busy = await NASImageLoader.shared.isBusy()
-                    if viewer == nil && !busy { break }
+                // Waits only while a photo is open, so the NAS answers what you look at first.
+                while !Task.isCancelled && viewer != nil {
                     try? await Task.sleep(nanoseconds: 800_000_000)
                 }
-                let chunk = Array(pending[start..<min(start + 2, pending.count)])
+                let chunk = Array(pending[start..<min(start + 3, pending.count)])
                 start += chunk.count
                 let results = await withTaskGroup(of: (String, CaptureInfo?).self) { group -> [(String, CaptureInfo?)] in
                     for item in chunk { group.addTask { (item.id, await CaptureReader.read(item, transport: transport)) } }
@@ -445,25 +460,43 @@ final class GalleryStore: ObservableObject {
                 }
                 guard !Task.isCancelled, self.account?.scope == account.scope else { return }
                 for (id, info) in results {
-                    if let info { captured[id] = info; failures = 0; sinceSave += 1; sinceReorder += 1; read += 1 } else { failures += 1 }
+                    if let info { captured[id] = info; failures = 0; sinceSave += 1; read += 1; capturedDirty = true } else { failures += 1 }
                 }
                 // The NAS stopped answering: stop here and resume when the app comes back.
                 if failures >= 12 { break }
                 if sinceSave >= 300 { saveCaptured(); sinceSave = 0 }
                 // Published every hundred files, not on each one, to keep the screen calm.
                 if read / 100 != (read - chunk.count) / 100 { datesRead = read; datesStatus = datesText(read, total) }
-                // Reorder now and then, not on every file, so the wall does not keep moving.
-                if sinceReorder > 0, Date().timeIntervalSince(lastReorder) > 180 {
-                    await reorderByCapture(); sinceReorder = 0; lastReorder = Date()
-                }
             }
-            guard !Task.isCancelled else { return }
-            saveCaptured()
-            datesRead = read
-            if sinceReorder > 0 { await reorderByCapture() }
-            datesStatus = nil
-            datesTask = nil
+            // The wall is reordered when you leave the app, not while you use it.
         }
+    }
+
+    /// Reorders the NAS by the dates read since the last time, if any.
+    func applyReadDates() async {
+        guard capturedDirty else { return }
+        capturedDirty = false
+        await reorderByCapture()
+    }
+
+    /// Time iOS gives in the background (at night, while charging): read capture dates
+    /// until it runs out.
+    func backgroundWork() async {
+        if !loaded {
+            if account != nil { await loadIndex() }
+            loaded = true
+        }
+        guard account != nil else { return }
+        await checkConnection()
+        guard nasState == .connected || nasState == .slow else { return }
+        readCaptureDates()
+        let running = datesTask
+        await withTaskCancellationHandler {
+            await running?.value
+        } onCancel: {
+            running?.cancel()
+        }
+        await applyReadDates()
     }
 
     private func datesText(_ done: Int, _ total: Int) -> String {
@@ -545,11 +578,13 @@ final class GalleryStore: ObservableObject {
                 return (merged, index, duplicates, nasVisible)
             }.value
             guard !Task.isCancelled else { return }
+            itemIndex = index
+            // Nothing visible changed: no new layouts, no redraw.
+            if merged == items && nasVisible == nasShown && duplicates == duplicateIDs { return }
             duplicateIDs = duplicates
             duplicatesHidden = duplicates.count
             nasShown = nasVisible
             items = merged
-            itemIndex = index
             revision += 1
         }
     }

@@ -321,3 +321,48 @@ final class SearchTests: XCTestCase {
         XCTAssertTrue(ids("   ").isEmpty)
     }
 }
+
+final class MediaBoxesTests: XCTestCase {
+    private func be(_ value: UInt64, _ count: Int) -> [UInt8] { (0..<count).map { UInt8((value >> (8 * UInt64(count - 1 - $0))) & 0xFF) } }
+    private func box(_ type: String, _ body: [UInt8]) -> [UInt8] { be(UInt64(8 + body.count), 4) + Array(type.utf8) + body }
+
+    private var tiff: [UInt8] {
+        var bytes: [UInt8] = Array("MM".utf8) + be(42, 2) + be(8, 4)
+        bytes += be(1, 2) + be(0x8769, 2) + be(4, 2) + be(1, 4) + be(26, 4) + be(0, 4)        // IFD0 → EXIF IFD at 26
+        bytes += be(1, 2) + be(0x9003, 2) + be(2, 2) + be(20, 4) + be(44, 4) + be(0, 4)        // DateTimeOriginal at 44
+        bytes += Array("2023:05:14 10:15:30".utf8) + [0]
+        return bytes
+    }
+
+    func testReadsExifFromTIFF() {
+        XCTAssertEqual(MediaBoxes.exifDate(tiff: tiff)?.date, "2023:05:14 10:15:30")
+    }
+
+    func testFindsTheExifBlockOfAHEIC() {
+        let exifItem = be(6, 4) + Array("Exif".utf8) + [0, 0] + tiff
+        let ftyp = box("ftyp", Array("heic".utf8) + be(0, 4))
+        func meta(exifOffset: UInt64) -> [UInt8] {
+            let infe = box("infe", [2, 0, 0, 0] + be(1, 2) + be(0, 2) + Array("Exif".utf8) + [0])
+            let iinf = box("iinf", [0, 0, 0, 0] + be(1, 2) + infe)
+            let iloc = box("iloc", [1, 0, 0, 0, 0x44, 0x00] + be(1, 2) + be(1, 2) + be(0, 2) + be(0, 2) + be(1, 2)
+                                  + be(exifOffset, 4) + be(UInt64(exifItem.count), 4))
+            let ipco = box("ipco", box("ispe", [0, 0, 0, 0] + be(4032, 4) + be(3024, 4)) + box("irot", [1]))
+            return box("meta", [0, 0, 0, 0] + iinf + iloc + box("iprp", ipco))
+        }
+        let offset = UInt64(ftyp.count + meta(exifOffset: 0).count)
+        let file = ftyp + meta(exifOffset: offset) + exifItem
+        let place = MediaBoxes.heifExifLocation(file)
+        XCTAssertEqual(place?.offset, offset)
+        XCTAssertEqual(place?.length, UInt64(exifItem.count))
+        let read = Array(file[Int(offset)..<(Int(offset) + exifItem.count)])
+        XCTAssertEqual(MediaBoxes.exifDate(heifItem: read)?.date, "2023:05:14 10:15:30")
+        XCTAssertEqual(MediaBoxes.heifSize(file)?.width, 3024, "irot 90° turns 4032 × 3024 upright")
+    }
+
+    func testJumpsOverTheVideoData() {
+        let ftyp = box("ftyp", Array("qt  ".utf8) + be(0, 4))
+        // A 5 MB mdat whose bytes are not at hand: the next box starts right after it.
+        let mdatHeader = be(5_000_000, 4) + Array("mdat".utf8)
+        XCTAssertEqual(MediaBoxes.nextTopLevelOffset(ftyp + mdatHeader), UInt64(ftyp.count) + 5_000_000)
+    }
+}

@@ -2,10 +2,14 @@ import SwiftUI
 
 @main
 struct LFAZGaleriaApp: App {
-    @StateObject private var store = GalleryStore()
+    @StateObject private var store = GalleryStore.shared
     @Environment(\.scenePhase) private var scenePhase
     /// «system», «light» or «dark», from Configuración.
     @AppStorage("appearance") private var appearance = "system"
+
+    init() {
+        BackgroundJobs.register()
+    }
 
     var body: some Scene {
         WindowGroup {
