@@ -462,3 +462,161 @@ struct ScrubLine: View {
         .accessibilityValue("\(Int(value * 100)) %")
     }
 }
+
+
+// MARK: Native photo page
+
+/// The largest rectangle with this shape that fits in `bounds`, centered. The viewer's zoom
+/// and the photo page both use it, so the photo lands exactly where it stays.
+func fittedRect(aspect: CGFloat, in bounds: CGRect) -> CGRect {
+    guard aspect > 0, bounds.width > 0, bounds.height > 0 else { return bounds }
+    if aspect > bounds.width / bounds.height {
+        let height = bounds.width / aspect
+        return CGRect(x: bounds.minX, y: bounds.minY + (bounds.height - height) / 2, width: bounds.width, height: height)
+    }
+    let width = bounds.height * aspect
+    return CGRect(x: bounds.minX + (bounds.width - width) / 2, y: bounds.minY, width: width, height: bounds.height)
+}
+
+/// A photo in a native zooming scroll view. Its place is computed from the photo's shape
+/// and the room left by the bars, before it is ever shown, and a sharper image of the same
+/// photo keeps the same place: nothing moves once it is open.
+final class PhotoCell: UICollectionViewCell, UIScrollViewDelegate {
+    private let scroll = UIScrollView()
+    private let imageView = UIImageView()
+    private var itemID: String?
+    private var insets = UIEdgeInsets.zero
+    private var aspect: CGFloat = 1
+    private var load: Task<Void, Never>?
+    private var onTap: () -> Void = {}
+    private var onZoom: (Bool) -> Void = { _ in }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        scroll.delegate = self
+        scroll.minimumZoomScale = 1
+        scroll.maximumZoomScale = 6
+        scroll.showsVerticalScrollIndicator = false
+        scroll.showsHorizontalScrollIndicator = false
+        scroll.contentInsetAdjustmentBehavior = .never
+        scroll.decelerationRate = .fast
+        scroll.backgroundColor = .clear
+        imageView.contentMode = .scaleToFill
+        imageView.clipsToBounds = true
+        scroll.addSubview(imageView)
+        contentView.addSubview(scroll)
+        let double = UITapGestureRecognizer(target: self, action: #selector(doubleTapped(_:)))
+        double.numberOfTapsRequired = 2
+        scroll.addGestureRecognizer(double)
+        let single = UITapGestureRecognizer(target: self, action: #selector(tapped))
+        single.require(toFail: double)
+        scroll.addGestureRecognizer(single)
+        isAccessibilityElement = true
+        accessibilityTraits = .image
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    @MainActor
+    func configure(item: GalleryItem, poster: UIImage?, insets: UIEdgeInsets, onTap: @escaping () -> Void, onZoom: @escaping (Bool) -> Void) {
+        self.onTap = onTap
+        self.onZoom = onZoom
+        accessibilityLabel = (item.isNAS ? "Foto del NAS, " : "Foto del iPhone, ") + Timeline.format(item.date, "d 'de' MMMM 'de' y")
+        if itemID != item.id {
+            itemID = item.id
+            load?.cancel()
+            scroll.setZoomScale(1, animated: false)
+            show(poster, aspectFallback: CGFloat(item.aspect))
+            load = Task { [weak self] in await self?.loadSharp(item, hasPoster: poster != nil) }
+        }
+        guard insets != self.insets else { return }
+        self.insets = insets
+        // The bars hide or show: the photo grows to the screen or makes room, smoothly.
+        if window != nil && scroll.zoomScale <= 1.01 {
+            UIView.animate(withDuration: 0.38, delay: 0, usingSpringWithDamping: 0.88, initialSpringVelocity: 0, options: [.allowUserInteraction]) {
+                self.placeImage()
+            }
+        } else {
+            setNeedsLayout()
+        }
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        load?.cancel()
+        load = nil
+        itemID = nil
+        imageView.image = nil
+        scroll.setZoomScale(1, animated: false)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        scroll.frame = contentView.bounds
+        if scroll.zoomScale <= 1.01 { placeImage() }
+    }
+
+    /// The photo's frame inside the room left by the bars.
+    private func placeImage() {
+        scroll.contentSize = scroll.bounds.size
+        imageView.frame = fittedRect(aspect: aspect, in: scroll.bounds.inset(by: insets))
+    }
+
+    private func show(_ image: UIImage?, aspectFallback: CGFloat? = nil) {
+        imageView.image = image
+        if let image, image.size.height > 0 { aspect = image.size.width / image.size.height }
+        else if let aspectFallback, aspectFallback > 0 { aspect = aspectFallback }
+        if scroll.zoomScale <= 1.01 { placeImage() }
+    }
+
+    @MainActor
+    private func loadSharp(_ item: GalleryItem, hasPoster: Bool) async {
+        let longSide = max(bounds.width, bounds.height, 1) * traitCollection.displayScale
+        switch item.source {
+        case .phone(let id):
+            for await next in PhoneLibrary.shared.images(id, pixels: CGSize(width: longSide * 1.5, height: longSide * 1.5), fill: false) {
+                guard !Task.isCancelled, itemID == item.id else { return }
+                // A blurry first image only when there is nothing on screen yet.
+                if hasPoster, let current = imageView.image, next.size.width * next.scale < current.size.width * current.scale { continue }
+                show(next)
+            }
+        case .nas(let url):
+            if imageView.image == nil, let cached = NASImageLoader.shared.cached(url) { show(cached) }
+            guard let account = ActiveAccount.current,
+                  let full = try? await NASImageLoader.shared.image(item, account: account, maxPixels: min(longSide * 2, 4096)),
+                  !Task.isCancelled, itemID == item.id else { return }
+            show(full)
+        }
+    }
+
+    // MARK: Zoom
+
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
+
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        // Keeps the photo centered while it is smaller than the screen.
+        let size = scrollView.bounds.size, content = imageView.frame.size
+        let x = max((size.width - content.width) / 2, 0), y = max((size.height - content.height) / 2, 0)
+        imageView.frame.origin = CGPoint(x: x, y: y)
+        scrollView.contentSize = CGSize(width: max(content.width, size.width), height: max(content.height, size.height))
+    }
+
+    func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+        if scale <= 1.01 { placeImage() }
+        onZoom(scale > 1.01)
+    }
+
+    @objc private func tapped() { onTap() }
+
+    @objc private func doubleTapped(_ gesture: UITapGestureRecognizer) {
+        if scroll.zoomScale > 1.01 {
+            scroll.setZoomScale(1, animated: true)
+        } else {
+            let point = gesture.location(in: imageView)
+            let scale: CGFloat = 2.5
+            let size = CGSize(width: scroll.bounds.width / scale, height: scroll.bounds.height / scale)
+            scroll.zoom(to: CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2, width: size.width, height: size.height), animated: true)
+        }
+    }
+}

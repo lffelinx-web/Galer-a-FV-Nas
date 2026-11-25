@@ -192,15 +192,7 @@ struct ViewerView: View {
         return image.size.height > 0 ? image.size.width / image.size.height : 1
     }
 
-    private func fitted(aspect: CGFloat, in bounds: CGRect) -> CGRect {
-        guard aspect > 0, bounds.height > 0 else { return bounds }
-        if aspect > bounds.width / bounds.height {
-            let height = bounds.width / aspect
-            return CGRect(x: 0, y: (bounds.height - height) / 2, width: bounds.width, height: height)
-        }
-        let width = bounds.height * aspect
-        return CGRect(x: (bounds.width - width) / 2, y: 0, width: width, height: bounds.height)
-    }
+    private func fitted(aspect: CGFloat, in bounds: CGRect) -> CGRect { fittedRect(aspect: aspect, in: bounds) }
 
     /// Back to the tile when the photo shown is the one that was tapped; otherwise a plain close.
     private func close() {
@@ -446,9 +438,16 @@ struct ViewerPager: UIViewRepresentable {
         func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int { parent.items.count }
 
         func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
-            let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "page", for: indexPath)
             let parent = self.parent
             let item = parent.items[indexPath.item]
+            // Photos use a native zooming view: its frame is computed once, from the photo's shape.
+            if item.kind == .photo, let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "photo", for: indexPath) as? PhotoCell {
+                cell.configure(item: item, poster: parent.poster(item), insets: UIEdgeInsets(top: parent.insets.top, left: parent.insets.leading,
+                                                                                               bottom: parent.insets.bottom, right: parent.insets.trailing),
+                               onTap: parent.toggleChrome, onZoom: parent.zoomChanged)
+                return cell
+            }
+            let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "page", for: indexPath)
             let currentIndex = parent.current.flatMap { positions[$0] } ?? 0
             cell.backgroundConfiguration = .clear()
             // The page gets the exact screen size, so it is laid out once and never shifts.
@@ -525,6 +524,7 @@ final class PagerContainer: UIView {
         collectionView.showsHorizontalScrollIndicator = false
         collectionView.contentInsetAdjustmentBehavior = .never
         collectionView.register(UICollectionViewCell.self, forCellWithReuseIdentifier: "page")
+        collectionView.register(PhotoCell.self, forCellWithReuseIdentifier: "photo")
         // Hidden until it sits on the tapped photo at its final size.
         collectionView.alpha = 0
         addSubview(collectionView)
