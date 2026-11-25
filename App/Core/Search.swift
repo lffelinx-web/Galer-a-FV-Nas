@@ -17,7 +17,7 @@ enum Search {
     }
 
     /// The matching items, in the order given (newest first).
-    static func run(_ query: String, in items: [GalleryItem], favorites: (GalleryItem) -> Bool,
+    static func run(_ query: String, in items: [GalleryItem], favorites: @escaping (GalleryItem) -> Bool,
                     calendar: Calendar = .current, now: Date = Date()) -> [GalleryItem] {
         let words = normalize(query).split(whereSeparator: { $0.isWhitespace || $0 == "," }).map(String.init).filter { !ignored.contains($0) }
         guard !words.isEmpty else { return [] }
