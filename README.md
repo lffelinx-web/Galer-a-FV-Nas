@@ -7,6 +7,7 @@ Galería de fotos para iPhone que reúne en un solo lugar las fotos del teléfon
 - **Fototeca**: un mosaico con las fotos del iPhone y del NAS ordenadas por fecha, como en el boceto. Al deslizar hacia las fotos, la barra de Liquid Glass cambia de forma: Inicio a la izquierda, **Días · Meses · Años** al centro y Configuración a la derecha.
 - **Conexión al NAS** por HTTPS (dominio DDNS de Synology) con ruta automática: IP local en casa y Tailscale fuera de casa, validando siempre el certificado del dominio. Es la misma conexión de LF’AZ Videos.
 - **Fotos del iPhone** leídas con PhotoKit. La app solo lee y nunca cambia ni borra nada.
+- **Respaldo en el NAS** (opcional): las fotos y videos nuevos se copian en su formato original a `Respaldo iPhone/año/mes` dentro de la carpeta del NAS, por Wi‑Fi o con datos móviles, también en segundo plano. Solo se escribe en esa carpeta y nunca se reemplaza ni borra un archivo.
 - **Todos los formatos** que iOS puede abrir: JPG, HEIC, PNG, GIF, WebP, TIFF, AVIF y RAW (DNG, CR2, CR3, NEF, ARW, RAF, ORF…), además de videos MOV, MP4 y M4V.
 
 ## Fase 1 (0.1.0): lectura

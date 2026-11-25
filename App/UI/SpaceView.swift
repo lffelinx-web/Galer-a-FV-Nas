@@ -125,6 +125,7 @@ struct SpaceView: View {
     @EnvironmentObject var store: GalleryStore
     /// Counting tens of thousands of photos only makes sense while Espacio is on screen.
     var visible = true
+    @ObservedObject private var backup = PhoneBackup.shared
     @State private var naming = false
     @State private var newName = ""
     @State private var stats = SpaceStats()
@@ -360,6 +361,16 @@ struct SpaceView: View {
                         Text("\(store.duplicatesHidden.formatted()) fotos del NAS ya están en este iPhone y se muestran una vez.")
                             .font(.footnote).foregroundStyle(Palette.secondary)
                     }
+                }
+            }
+
+            if backup.enabled {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.up.to.line.circle").foregroundStyle(Palette.accent)
+                    Text("Respaldo").font(.footnote.weight(.semibold)).foregroundStyle(Palette.ink)
+                    Spacer()
+                    if backup.running { ProgressView().controlSize(.mini) }
+                    Text(backup.summary).font(.footnote).foregroundStyle(Palette.secondary).lineLimit(1).minimumScaleFactor(0.8)
                 }
             }
         }

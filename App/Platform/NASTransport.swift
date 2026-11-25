@@ -33,10 +33,14 @@ final class NASTransport: @unchecked Sendable {
 
     init(_ account: NASAccount) { self.account = account }
 
-    func request(_ url: URL, method: String = "GET", headers: [String: String] = [:], body: Data = Data(), limit: Int = 2_000_000, allowPrefix: Bool = false) async throws -> NASResponse {
+    /// `bodyFile` sends a file from disk as the body, a piece at a time (the backup). Statuses
+    /// in `accept` come back as a response instead of an error, without their body.
+    func request(_ url: URL, method: String = "GET", headers: [String: String] = [:], body: Data = Data(), bodyFile: URL? = nil,
+                 accept: Set<Int> = [], limit: Int = 2_000_000, allowPrefix: Bool = false) async throws -> NASResponse {
 
         try await NASRouteFallback.perform(account: account) { route in
-            var response = try await requestOnRoute(url, route: route, method: method, headers: headers, body: body, limit: limit, allowPrefix: allowPrefix)
+            var response = try await requestOnRoute(url, route: route, method: method, headers: headers, body: body, bodyFile: bodyFile, accept: accept,
+                                                    limit: limit, allowPrefix: allowPrefix)
             response.route = route
             NotificationCenter.default.post(name: .nasRequestSucceeded, object: nil, userInfo: ["scope": account.scope])
             return response
@@ -45,9 +49,14 @@ final class NASTransport: @unchecked Sendable {
 
     /// Tries a connection kept open from an earlier request first; a stale one (closed by
     /// the NAS while idle) is replaced by a new connection once.
-    private func requestOnRoute(_ url: URL, route: String, method: String, headers: [String: String], body: Data, limit: Int, allowPrefix: Bool) async throws -> NASResponse {
+    private func requestOnRoute(_ url: URL, route: String, method: String, headers: [String: String], body: Data, bodyFile: URL?, accept: Set<Int>,
+                                limit: Int, allowPrefix: Bool) async throws -> NASResponse {
         let dsm = URLPolicy.allowedDSM(url, account: account)
-        guard (URLPolicy.allowed(url, root: account.root) && ["GET", "PROPFIND"].contains(method)) || (dsm && ["GET", "POST"].contains(method)),
+        // Writing is only allowed inside the backup folder, and a move only to a name there
+        // that does not exist yet (`Overwrite: F`).
+        let backupWrite = ["PUT", "MKCOL", "MOVE"].contains(method) && URLPolicy.allowedBackup(url, root: account.root)
+            && (method != "MOVE" || (headers["Overwrite"] == "F" && headers["Destination"].flatMap { URL(string: $0) }.map { URLPolicy.allowedBackup($0, root: account.root) } == true))
+        guard (URLPolicy.allowed(url, root: account.root) && ["GET", "PROPFIND"].contains(method)) || (dsm && ["GET", "POST"].contains(method)) || backupWrite,
               NASAccount.validRoute(route), !account.username.contains(":"),
               let host = url.host, let port = NWEndpoint.Port(rawValue: UInt16(url.port ?? 443)) else {
             throw GalleryError.message("La solicitud está fuera de la carpeta autorizada.")
@@ -55,14 +64,16 @@ final class NASTransport: @unchecked Sendable {
         let key = "\(route)|\(host)|\(port.rawValue)"
         if let pooled = NASConnectionPool.shared.take(key) {
             do {
-                return try await exchange(url, pooled: pooled, key: key, host: host, port: port, route: route, method: method, headers: headers, body: body, limit: limit, allowPrefix: allowPrefix, dsm: dsm)
+                return try await exchange(url, pooled: pooled, key: key, host: host, port: port, route: route, method: method, headers: headers, body: body,
+                                          bodyFile: bodyFile, accept: accept, limit: limit, allowPrefix: allowPrefix, dsm: dsm)
             } catch let error as URLError where error.code == .networkConnectionLost {
                 // The NAS closed it while it waited; continue with a fresh one.
             } catch let error as NWError {
                 _ = error
             }
         }
-        return try await exchange(url, pooled: nil, key: key, host: host, port: port, route: route, method: method, headers: headers, body: body, limit: limit, allowPrefix: allowPrefix, dsm: dsm)
+        return try await exchange(url, pooled: nil, key: key, host: host, port: port, route: route, method: method, headers: headers, body: body,
+                                  bodyFile: bodyFile, accept: accept, limit: limit, allowPrefix: allowPrefix, dsm: dsm)
     }
 
     private func connect(host: String, port: NWEndpoint.Port, route: String) async throws -> PooledConnection {
@@ -102,12 +113,13 @@ final class NASTransport: @unchecked Sendable {
     }
 
     private func exchange(_ url: URL, pooled: PooledConnection?, key: String, host: String, port: NWEndpoint.Port, route: String, method: String,
-                          headers: [String: String], body: Data, limit: Int, allowPrefix: Bool, dsm: Bool) async throws -> NASResponse {
+                          headers: [String: String], body: Data, bodyFile: URL?, accept: Set<Int>, limit: Int, allowPrefix: Bool, dsm: Bool) async throws -> NASResponse {
         let link: PooledConnection
         if let pooled { link = pooled } else { link = try await connect(host: host, port: port, route: route) }
         let connection = link.connection, reader = link.reader
-        let timeout = DispatchWorkItem { connection.cancel() }
-        link.queue.asyncAfter(deadline: .now() + 35, execute: timeout)
+        // A long upload keeps the connection alive as long as pieces keep going out.
+        let timeout = Watchdog(queue: link.queue) { connection.cancel() }
+        timeout.arm(35)
         // Kept open for the next request only when the whole response was read.
         var reusable = false
         defer {
@@ -122,24 +134,57 @@ final class NASTransport: @unchecked Sendable {
             let path = components.percentEncodedPath + (dsm ? components.percentEncodedQuery.map { "?" + $0 } ?? "" : "")
             let hostValue = (host.contains(":") ? "[\(host)]" : host) + (url.port.map { ":\($0)" } ?? "")
             let credential = Data("\(account.username):\(account.password)".utf8).base64EncodedString()
+            var fileSize: Int64?
+            if let bodyFile {
+                guard let size = (try? FileManager.default.attributesOfItem(atPath: bodyFile.path))?[.size] as? NSNumber else {
+                    throw GalleryError.message("No se encontró el archivo para subir.")
+                }
+                fileSize = size.int64Value
+            }
             var lines = ["\(method) \(path.isEmpty ? "/" : path) HTTP/1.1", "Host: \(hostValue)", "Authorization: Basic \(credential)",
-                         "Connection: keep-alive", "Accept-Encoding: identity", "Content-Length: \(body.count)"]
+                         "Connection: keep-alive", "Accept-Encoding: identity", "Content-Length: \(fileSize ?? Int64(body.count))"]
             for (key, value) in headers {
                 guard !key.contains("\r"), !key.contains("\n"), !value.contains("\r"), !value.contains("\n") else { throw GalleryError.message("Cabecera no válida.") }
                 lines.append("\(key): \(value)")
             }
             var wire = Data((lines.joined(separator: "\r\n") + "\r\n\r\n").utf8); wire.append(body)
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                connection.send(content: wire, completion: .contentProcessed { error in
-                    if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-                })
+            func send(_ data: Data) async throws {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    connection.send(content: data, completion: .contentProcessed { error in
+                        if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+                    })
+                }
+            }
+            try await send(wire)
+            if let bodyFile, let fileSize {
+                let file = try FileHandle(forReadingFrom: bodyFile)
+                defer { try? file.close() }
+                var sent: Int64 = 0
+                while sent < fileSize {
+                    try Task.checkCancellation()
+                    guard let piece = try file.read(upToCount: 262_144), !piece.isEmpty else { throw GalleryError.message("El archivo cambió mientras se subía.") }
+                    try await send(piece)
+                    sent += Int64(piece.count)
+                    timeout.arm(35)
+                }
+                // The NAS may take a moment to store a large file before answering.
+                timeout.arm(90)
             }
             let head = try await reader.until(Data("\r\n\r\n".utf8), max: 65536)
+            if let text = String(data: head, encoding: .isoLatin1), let first = text.components(separatedBy: "\r\n").first,
+               let status = Int(first.split(separator: " ").dropFirst().first ?? ""), !(200...299).contains(status), accept.contains(status) {
+                // Expected answers such as «already exists»: the body is not read, so this
+                // connection is not reused.
+                return NASResponse(status: status, headers: [:], data: Data())
+            }
             guard let text = String(data: head, encoding: .isoLatin1), let first = text.components(separatedBy: "\r\n").first,
                   let status = Int(first.split(separator: " ").dropFirst().first ?? ""), (200...299).contains(status) else {
                 let statusLine = String(data: head.prefix(100), encoding: .isoLatin1) ?? ""
                 if statusLine.contains("401") { throw GalleryError.message("Usuario o contraseña incorrectos.") }
-                if statusLine.contains("403") { throw GalleryError.message("La cuenta no tiene permiso de lectura.") }
+                if statusLine.contains("403") {
+                    throw GalleryError.message(["PUT", "MKCOL", "MOVE"].contains(method) ? "La cuenta no tiene permiso de escritura en la carpeta del NAS." : "La cuenta no tiene permiso de lectura.")
+                }
+                if statusLine.contains("507") { throw GalleryError.message("El NAS no tiene espacio libre.") }
                 throw GalleryError.message("El NAS rechazó la solicitud. Revisa la carpeta y el acceso WebDAV; no se siguen redirecciones.")
             }
             var fields: [String: String] = [:]
@@ -158,7 +203,10 @@ final class NASTransport: @unchecked Sendable {
                 }
                 result.append(part); return !allowPrefix || result.count < limit
             }
-            if fields["transfer-encoding"]?.lowercased() == "chunked" {
+            if status == 204 || status == 304 {
+                // These answers never carry a body.
+                complete = true
+            } else if fields["transfer-encoding"]?.lowercased() == "chunked" {
                 outer: while true {
                     let line = try await reader.until(Data("\r\n".utf8), max: 4096)
                     guard let text = String(data: line, encoding: .ascii), let number = text.split(separator: ";").first,
@@ -271,6 +319,28 @@ extension NASTransport {
         try FileManager.default.moveItem(at: partial, to: destination)
         finished = true
     }
+}
+
+/// Cancels a connection when it goes quiet for too long; each `arm` starts the wait again.
+final class Watchdog: @unchecked Sendable {
+    private let queue: DispatchQueue
+    private let action: () -> Void
+    private var item: DispatchWorkItem?
+
+    init(queue: DispatchQueue, action: @escaping () -> Void) { self.queue = queue; self.action = action }
+
+    func arm(_ seconds: Double) {
+        queue.async { [self] in
+            item?.cancel()
+            let next = DispatchWorkItem(block: action)
+            item = next
+            queue.asyncAfter(deadline: .now() + seconds, execute: next)
+        }
+    }
+
+    func cancel() { queue.async { [self] in item?.cancel(); item = nil } }
+
+    deinit { item?.cancel() }
 }
 
 /// An open HTTPS connection to the NAS with what is left in its buffer.

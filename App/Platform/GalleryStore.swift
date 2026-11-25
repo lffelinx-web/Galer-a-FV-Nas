@@ -199,6 +199,7 @@ final class GalleryStore: ObservableObject {
         loaded = true
         guard account != nil else { return }
         await checkConnection()
+        if nasState == .connected { PhoneBackup.shared.start() }
         if nasItems.isEmpty && nasState == .connected { scan() } else if nasState == .connected { searchIfStale() }
     }
 
@@ -219,7 +220,7 @@ final class GalleryStore: ObservableObject {
     func resume() async {
         guard loaded else { return }
         await checkConnection()
-        if nasState == .connected { searchIfStale() }
+        if nasState == .connected { PhoneBackup.shared.start(); searchIfStale() }
     }
 
     /// Going to the background: keep what was read so far, put the NAS in date order, and
@@ -257,6 +258,8 @@ final class GalleryStore: ObservableObject {
         guard fresh != phoneItems else { return }
         phoneItems = fresh
         merge()
+        // A new photo on the iPhone: copy it to the NAS if the backup is on.
+        if loaded { PhoneBackup.shared.start() }
     }
 
     // MARK: NAS
@@ -489,6 +492,9 @@ final class GalleryStore: ObservableObject {
         guard account != nil else { return }
         await checkConnection()
         guard nasState == .connected || nasState == .slow else { return }
+        // The backup first: new photos are safe on the NAS before anything else.
+        await PhoneBackup.shared.runNow()
+        guard !Task.isCancelled else { return }
         readCaptureDates()
         let running = datesTask
         await withTaskCancellationHandler {

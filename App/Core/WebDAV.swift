@@ -29,6 +29,18 @@ enum URLPolicy {
             u.user == nil && u.password == nil && u.query == nil && u.fragment == nil && safePath(url) &&
             u.percentEncodedPath.hasPrefix(r.percentEncodedPath)
     }
+    /// The folder the iPhone backup writes to, inside the photo folder.
+    static let backupFolder = "Respaldo iPhone"
+
+    /// Inside the backup folder (or the folder itself): the only place the app writes to.
+    static func allowedBackup(_ url: URL, root: URL) -> Bool {
+        guard allowed(url, root: root), let u = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let r = URLComponents(url: root, resolvingAgainstBaseURL: false),
+              let folder = backupFolder.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else { return false }
+        let base = r.percentEncodedPath + folder
+        return u.percentEncodedPath == base || u.percentEncodedPath.hasPrefix(base + "/")
+    }
+
     /// The DSM web API of the same NAS (`https://host:5001/webapi/entry.cgi`), used only to
     /// read the free space of the share.
     static func allowedDSM(_ url: URL, account: NASAccount) -> Bool {

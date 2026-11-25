@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject var store: GalleryStore
+    @ObservedObject private var backup = PhoneBackup.shared
     @State private var address = ""
     @State private var user = ""
     @State private var password = ""
@@ -131,6 +132,23 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle("Respaldar fotos nuevas", isOn: Binding(get: { backup.enabled }, set: { on in Task { await backup.setEnabled(on) } }))
+                        .disabled(store.account == nil || store.photoAccess != .full)
+                    if backup.enabled {
+                        Toggle("Usar datos móviles", isOn: $backup.useCellular)
+                        LabeledContent("Estado") {
+                            HStack(spacing: 6) {
+                                if backup.running { ProgressView().controlSize(.small) }
+                                Text(backup.summary).multilineTextAlignment(.trailing)
+                            }
+                        }
+                        if backup.copied > 0 { LabeledContent("Copiadas", value: backup.copied.formatted()) }
+                    }
+                } header: { Text("Respaldo en el NAS") } footer: {
+                    Text(backupFooter)
+                }
+
+                Section {
                     LabeledContent("Miniaturas y videos", value: cacheSize)
                     Button("Vaciar caché") {
                         Task { await NASImageLoader.shared.clear(); refreshCacheSize() }
@@ -205,6 +223,15 @@ struct SettingsView: View {
         if let space = store.spaceText { parts.append(space) }
         if let date = store.lastScan { parts.append("Revisado " + date.formatted(.relative(presentation: .named))) }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private var backupFooter: String {
+        if store.account == nil { return "Conecta el NAS para respaldar las fotos de este iPhone." }
+        if store.photoAccess != .full { return "El respaldo necesita acceso completo a las fotos." }
+        var text = "Las fotos y videos que tomes desde que lo actives se copian en su formato original a «Respaldo iPhone/año/mes» en la carpeta del NAS, también en segundo plano. Nunca se borra ni se reemplaza nada, ni en el iPhone ni en el NAS."
+        if let since = backup.since { text += " Activado el " + since.formatted(date: .long, time: .shortened) + "." }
+        if backup.enabled && !backup.useCellular { text += " Con datos móviles espera a una red Wi‑Fi." }
+        return text
     }
 
     private func fill() {

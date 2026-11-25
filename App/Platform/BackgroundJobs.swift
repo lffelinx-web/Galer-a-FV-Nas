@@ -2,7 +2,7 @@ import BackgroundTasks
 import Foundation
 
 /// Work iOS lets the app do while it is closed, usually at night with the iPhone charging:
-/// reading capture dates (and, later, the backup to the NAS).
+/// copying new photos to the NAS and reading capture dates.
 enum BackgroundJobs {
     static let identifier = "com.lfaz.galeria.trabajo"
 
@@ -19,11 +19,12 @@ enum BackgroundJobs {
         }
     }
 
-    /// Asks for the next window: with a network and, to spare the battery, while charging.
-    static func schedule() {
+    /// Asks for the next window: with a network and, to spare the battery, while charging,
+    /// unless there are photos waiting to be copied to the NAS.
+    @MainActor static func schedule() {
         let request = BGProcessingTaskRequest(identifier: identifier)
         request.requiresNetworkConnectivity = true
-        request.requiresExternalPower = true
+        request.requiresExternalPower = !PhoneBackup.shared.hasPending
         request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
         try? BGTaskScheduler.shared.submit(request)
     }

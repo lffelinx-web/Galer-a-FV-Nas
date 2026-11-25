@@ -366,3 +366,50 @@ final class MediaBoxesTests: XCTestCase {
         XCTAssertEqual(MediaBoxes.nextTopLevelOffset(ftyp + mdatHeader), UInt64(ftyp.count) + 5_000_000)
     }
 }
+
+final class BackupPlanTests: XCTestCase {
+    private let root = URL(string: "https://nas.example.com:5006/home/Photos/")!
+
+    func testFolderByMonth() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/Mexico_City")!
+        let date = calendar.date(from: DateComponents(year: 2026, month: 3, day: 9, hour: 12))!
+        XCTAssertEqual(BackupPlan.folders(for: date, calendar: calendar), ["Respaldo iPhone", "2026", "03"])
+    }
+
+    func testNumbering() {
+        XCTAssertEqual(BackupPlan.suffixed("IMG_1.HEIC", 1), "IMG_1.HEIC")
+        XCTAssertEqual(BackupPlan.suffixed("IMG_1.HEIC", 2), "IMG_1 (2).HEIC")
+        XCTAssertEqual(BackupPlan.suffixed("nota", 3), "nota (3)")
+        XCTAssertEqual(BackupPlan.distinctNames(["A.JPG", "a.jpg", "B.MOV"]), ["A.JPG", "a (2).jpg", "B.MOV"])
+        XCTAssertEqual(BackupPlan.safeName("../.oculto/x:y.jpg", fallback: "f"), "_.oculto_x_y.jpg")
+        XCTAssertEqual(BackupPlan.safeName("...", fallback: "f"), "f")
+    }
+
+    func testNeverReplacesAndResumes() {
+        let live = [(name: "IMG_1.HEIC", size: Int64(100)), (name: "IMG_1.MOV", size: Int64(300))]
+        // Nothing there: both uploaded with their names.
+        XCTAssertEqual(BackupPlan.choose(live, existing: [:]).number, 1)
+        XCTAssertEqual(BackupPlan.choose(live, existing: [:]).upload, [0, 1])
+        // The photo was copied before the app was closed: only the video is left.
+        let half = BackupPlan.choose(live, existing: ["img_1.heic": 100])
+        XCTAssertEqual(half.number, 1); XCTAssertEqual(half.upload, [1])
+        // Another photo with the same name: the pair is numbered together, nothing replaced.
+        let other = BackupPlan.choose(live, existing: ["img_1.heic": 999])
+        XCTAssertEqual(other.number, 2); XCTAssertEqual(other.upload, [0, 1])
+        // A file of unknown size is never taken as ours.
+        XCTAssertEqual(BackupPlan.choose(live, existing: ["img_1.mov": nil]).number, 2)
+        // Already all there.
+        XCTAssertEqual(BackupPlan.choose(live, existing: ["img_1.heic": 100, "img_1.mov": 300]).upload, [])
+    }
+
+    func testWritesOnlyInsideBackupFolder() {
+        XCTAssertTrue(URLPolicy.allowedBackup(URL(string: "https://nas.example.com:5006/home/Photos/Respaldo%20iPhone/")!, root: root))
+        XCTAssertTrue(URLPolicy.allowedBackup(URL(string: "https://nas.example.com:5006/home/Photos/Respaldo%20iPhone/2026/11/IMG_1.HEIC")!, root: root))
+        XCTAssertTrue(URLPolicy.allowedBackup(root.appendingPathComponent("Respaldo iPhone", isDirectory: true).appendingPathComponent("2026").appendingPathComponent("a b.HEIC"), root: root))
+        XCTAssertFalse(URLPolicy.allowedBackup(URL(string: "https://nas.example.com:5006/home/Photos/2023/IMG_1.HEIC")!, root: root))
+        XCTAssertFalse(URLPolicy.allowedBackup(URL(string: "https://nas.example.com:5006/home/Photos/Respaldo%20iPhone2/x.jpg")!, root: root))
+        XCTAssertFalse(URLPolicy.allowedBackup(URL(string: "https://nas.example.com:5006/home/Photos/Respaldo%20iPhone/../x.jpg")!, root: root))
+        XCTAssertFalse(URLPolicy.allowedBackup(URL(string: "https://otro.example.com:5006/home/Photos/Respaldo%20iPhone/x.jpg")!, root: root))
+    }
+}
