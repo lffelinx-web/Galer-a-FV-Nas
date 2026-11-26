@@ -33,7 +33,7 @@ jobs:
             -derivedDataPath build-tests CODE_SIGNING_ALLOWED=NO build-for-testing
       - name: Probar en simulador
         shell: bash
-        timeout-minutes: 30
+        timeout-minutes: 40
         run: |
           # A fresh simulator for each attempt: the preinstalled ones sometimes hang while booting.
           # Same model and iOS as an iPhone simulator that is already installed.
@@ -41,7 +41,7 @@ jobs:
           attempt() {
             DEVICE=$(xcrun simctl create "Pruebas-$1" "$TYPE" "$RUNTIME")
             xcrun simctl boot "$DEVICE" || true
-            if ! perl -e 'alarm shift; exec @ARGV' 300 xcrun simctl bootstatus "$DEVICE" -b; then
+            if ! perl -e 'alarm shift; exec @ARGV' 480 xcrun simctl bootstatus "$DEVICE" -b; then
               echo "::warning::El simulador no arrancó a tiempo (intento $1)."
               xcrun simctl delete "$DEVICE" || true
               return 1
