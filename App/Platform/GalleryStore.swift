@@ -200,6 +200,7 @@ final class GalleryStore: ObservableObject {
         await reloadPhone()
         loaded = true
         guard account != nil else { return }
+        PlaceNames.shared.fill(Array(itemIndex.values))
         await checkConnection()
         if nasState == .connected { PhoneBackup.shared.start() }
         if nasItems.isEmpty && nasState == .connected { scan() } else if nasState == .connected { searchIfStale() }
@@ -221,6 +222,7 @@ final class GalleryStore: ObservableObject {
     /// Back from the background: check the NAS and pick up the capture dates where they stopped.
     func resume() async {
         guard loaded else { return }
+        PlaceNames.shared.fill(Array(itemIndex.values))
         await checkConnection()
         if nasState == .connected { PhoneBackup.shared.start(); searchIfStale() }
     }
@@ -230,6 +232,7 @@ final class GalleryStore: ObservableObject {
     func suspend() async {
         await saveLearned()
         saveCaptured()
+        PlaceNames.shared.stop()
         BackgroundJobs.schedule()
         await applyReadDates()
     }
@@ -431,11 +434,15 @@ final class GalleryStore: ObservableObject {
     func readCaptureDates() {
         guard let account, datesTask == nil, !scanning else { return }
         let known = captured
-        let pending = nasItems.filter { known[$0.id] == nil }
+        // First the files without a date; then, once, the ones read before locations were
+        // looked for, for the map.
+        let undated = nasItems.filter { known[$0.id] == nil }
+        let unplaced = nasItems.filter { known[$0.id] != nil && known[$0.id]?.geo != true }
+        let pending = undated + unplaced
         let total = nasItems.count
-        datesRead = total - pending.count
+        datesRead = total - undated.count
         guard !pending.isEmpty else { datesStatus = nil; return }
-        datesStatus = datesText(datesRead, total)
+        datesStatus = undated.isEmpty ? placesText(0, unplaced.count) : datesText(datesRead, total)
         let token = UUID()
         datesToken = token
         datesTask = Task {
@@ -444,6 +451,7 @@ final class GalleryStore: ObservableObject {
             let transport = NASTransport(account)
             var failures = 0, sinceSave = 0
             var read = self.datesRead
+            var placed = 0
             var start = 0
             // Stopped (by a search, or iOS ending the background time): keep what was read.
             defer {
@@ -469,13 +477,29 @@ final class GalleryStore: ObservableObject {
                 }
                 guard !Task.isCancelled, self.account?.scope == account.scope else { return }
                 for (id, info) in results {
-                    if let info { captured[id] = info; failures = 0; sinceSave += 1; read += 1; capturedDirty = true } else { failures += 1 }
+                    guard let info else { failures += 1; continue }
+                    failures = 0; sinceSave += 1
+                    if var earlier = captured[id] {
+                        // Read again only for its location: the date stays as it was.
+                        earlier.geo = true
+                        earlier.latitude = info.latitude; earlier.longitude = info.longitude
+                        if earlier.date == nil, info.date != nil { earlier.date = info.date; capturedDirty = true }
+                        captured[id] = earlier
+                        placed += 1
+                        if info.latitude != nil { capturedDirty = true }
+                    } else {
+                        captured[id] = info; read += 1; capturedDirty = true
+                    }
                 }
                 // The NAS stopped answering: stop here and resume when the app comes back.
                 if failures >= 12 { break }
                 if sinceSave >= 300 { saveCaptured(); sinceSave = 0 }
                 // Published every hundred files, not on each one, to keep the screen calm.
-                if read / 100 != (read - chunk.count) / 100 { datesRead = read; datesStatus = datesText(read, total) }
+                if start <= undated.count {
+                    if read / 100 != (read - chunk.count) / 100 { datesRead = read; datesStatus = datesText(read, total) }
+                } else if placed / 100 != (placed - chunk.count) / 100 || start == undated.count + chunk.count {
+                    datesRead = read; datesStatus = placesText(placed, unplaced.count)
+                }
             }
             // The wall is reordered when you leave the app, not while you use it.
         }
@@ -538,6 +562,10 @@ final class GalleryStore: ObservableObject {
         await applyReadDates()
     }
 
+    private func placesText(_ done: Int, _ total: Int) -> String {
+        "Leyendo ubicaciones · \(done.formatted()) de \(total.formatted())"
+    }
+
     private func datesText(_ done: Int, _ total: Int) -> String {
         "Ordenando por fecha · \(done.formatted()) de \(total.formatted())"
     }
@@ -591,6 +619,7 @@ final class GalleryStore: ObservableObject {
             if let date = info.date { result[index].date = date }
             if let aspect = info.aspect, aspect.isFinite, aspect > 0 { result[index].aspect = aspect }
             if let duration = info.duration { result[index].duration = duration }
+            if let latitude = info.latitude, let longitude = info.longitude { result[index].latitude = latitude; result[index].longitude = longitude }
         }
         return result.sorted { $0.date == $1.date ? $0.id < $1.id : $0.date > $1.date }
     }

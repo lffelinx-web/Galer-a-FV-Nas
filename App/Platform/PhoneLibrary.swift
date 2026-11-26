@@ -163,6 +163,7 @@ extension GalleryItem {
                   date: asset.creationDate ?? asset.modificationDate ?? Date(timeIntervalSince1970: 0), kind: kind,
                   aspect: asset.pixelHeight > 0 ? Double(asset.pixelWidth) / Double(asset.pixelHeight) : 1,
                   duration: asset.mediaType == .video ? asset.duration : nil, name: "", bytes: nil, folder: nil, favorite: false,
-                  screenshot: asset.mediaSubtypes.contains(.photoScreenshot))
+                  screenshot: asset.mediaSubtypes.contains(.photoScreenshot), exactDate: nil,
+                  latitude: asset.location.map { $0.coordinate.latitude }, longitude: asset.location.map { $0.coordinate.longitude })
     }
 }

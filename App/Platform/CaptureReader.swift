@@ -6,6 +6,10 @@ struct CaptureInfo: Codable, Equatable {
     var date: Date?
     var aspect: Double?
     var duration: Double?
+    var latitude: Double?
+    var longitude: Double?
+    /// The file was also checked for a location (older reads only looked for the date).
+    var geo: Bool?
 }
 
 /// Reads the capture date from the first bytes of each file, so the NAS can be ordered by
@@ -17,6 +21,13 @@ enum CaptureReader {
 
     /// Nil when the NAS could not be reached, so the file is tried again later.
     static func read(_ item: GalleryItem, transport: NASTransport) async -> CaptureInfo? {
+        guard var info = await readFile(item, transport: transport) else { return nil }
+        info.geo = true
+        if let lat = info.latitude, let lon = info.longitude, !GeoPlace.valid(lat, lon) { info.latitude = nil; info.longitude = nil }
+        return info
+    }
+
+    private static func readFile(_ item: GalleryItem, transport: NASTransport) async -> CaptureInfo? {
         guard let url = item.nasURL else { return nil }
         do {
             let head = try await transport.range(url, start: 0, count: headBytes, prefix: true).data
@@ -45,7 +56,7 @@ enum CaptureReader {
             if let place = MediaBoxes.heifExifLocation(bytes), place.length > 8, place.length < 262_144 {
                 let exif = [UInt8](try await transport.range(url, start: Int64(place.offset), count: Int(place.length), prefix: true).data)
                 if let found = MediaBoxes.exifDate(heifItem: exif) {
-                    var info = CaptureInfo(date: exifDate(found.date, offset: found.offset))
+                    var info = CaptureInfo(date: found.date.flatMap { exifDate($0, offset: found.offset) }, latitude: found.latitude, longitude: found.longitude)
                     if let size = MediaBoxes.heifSize(bytes) { info.aspect = Double(size.width) / Double(size.height) }
                     if info.date != nil { return info }
                 }
@@ -89,6 +100,12 @@ enum CaptureReader {
             let orientation = properties[kCGImagePropertyOrientation] as? Int ?? 1
             info.aspect = (5...8).contains(orientation) ? height / width : width / height
         }
+        let gps = properties[kCGImagePropertyGPSDictionary] as? [CFString: Any]
+        if var latitude = gps?[kCGImagePropertyGPSLatitude] as? Double, var longitude = gps?[kCGImagePropertyGPSLongitude] as? Double {
+            if (gps?[kCGImagePropertyGPSLatitudeRef] as? String) == "S" { latitude = -latitude }
+            if (gps?[kCGImagePropertyGPSLongitudeRef] as? String) == "W" { longitude = -longitude }
+            info.latitude = latitude; info.longitude = longitude
+        }
         return info.date == nil && info.aspect == nil ? nil : info
     }
 
@@ -129,6 +146,7 @@ enum CaptureReader {
             if date.timeIntervalSince1970 > 631_152_000 { info.date = date } // after 1990
         }
         if let timescale, let length, timescale > 0, length > 0 { info.duration = Double(length) / Double(timescale) }
+        if let place = GeoPlace.iso6709(in: bytes) { info.latitude = place.latitude; info.longitude = place.longitude }
         var search = 0
         while let tkhd = find("tkhd", in: bytes, from: search) {
             search = tkhd

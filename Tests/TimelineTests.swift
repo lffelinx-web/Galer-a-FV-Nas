@@ -413,3 +413,58 @@ final class BackupPlanTests: XCTestCase {
         XCTAssertFalse(URLPolicy.allowedBackup(URL(string: "https://otro.example.com:5006/home/Photos/Respaldo%20iPhone/x.jpg")!, root: root))
     }
 }
+
+final class GeoPlaceTests: XCTestCase {
+    private func be(_ value: UInt64, _ count: Int) -> [UInt8] { (0..<count).map { UInt8((value >> (8 * UInt64(count - 1 - $0))) & 0xFF) } }
+
+    func testReadsGPSFromExif() {
+        var bytes: [UInt8] = Array("MM".utf8) + be(42, 2) + be(8, 4)
+        bytes += be(1, 2) + be(0x8825, 2) + be(4, 2) + be(1, 4) + be(26, 4) + be(0, 4)      // IFD0 → GPS IFD at 26
+        bytes += be(4, 2)
+        bytes += be(1, 2) + be(2, 2) + be(2, 4) + Array("N".utf8) + [0, 0, 0]
+        bytes += be(2, 2) + be(5, 2) + be(3, 4) + be(80, 4)
+        bytes += be(3, 2) + be(2, 2) + be(2, 4) + Array("W".utf8) + [0, 0, 0]
+        bytes += be(4, 2) + be(5, 2) + be(3, 4) + be(104, 4)
+        bytes += be(0, 4)
+        bytes += be(20, 4) + be(1, 4) + be(39, 4) + be(1, 4) + be(3600, 4) + be(100, 4)
+        bytes += be(103, 4) + be(1, 4) + be(21, 4) + be(1, 4) + be(0, 4) + be(1, 4)
+        let found = MediaBoxes.exifDate(tiff: bytes)
+        XCTAssertNil(found?.date ?? nil)
+        XCTAssertEqual(found?.latitude ?? 0, 20.66, accuracy: 0.0001)
+        XCTAssertEqual(found?.longitude ?? 0, -103.35, accuracy: 0.0001)
+    }
+
+    func testReadsVideoLocation() {
+        let bytes = [UInt8](repeating: 0, count: 20) + Array("\u{A9}xyz".utf8) + Array("+20.6597-103.3496+1550.000/".utf8)
+        let place = GeoPlace.iso6709(in: bytes)
+        XCTAssertEqual(place?.latitude ?? 0, 20.6597, accuracy: 0.00001)
+        XCTAssertEqual(place?.longitude ?? 0, -103.3496, accuracy: 0.00001)
+        XCTAssertNil(GeoPlace.iso6709(in: Array("sin lugar 12.5".utf8)))
+    }
+
+    func testAreasAndClusters() {
+        XCTAssertEqual(GeoPlace.areaKey(20.6597, -103.3496), "20.7,-103.3")
+        XCTAssertEqual(GeoPlace.areaCenter("20.7,-103.3")?.latitude, 20.7)
+        let now = Date()
+        let points = (0..<30).map { GeoPlace.Point(id: "g\($0)", latitude: 20.66 + Double($0) * 0.0001, longitude: -103.35, date: now.addingTimeInterval(Double($0))) }
+            + [GeoPlace.Point(id: "far", latitude: 19.43, longitude: -99.13, date: now)]
+        // Seen from far away: Guadalajara and Mexico City are two pins.
+        let wide = GeoPlace.clusters(points, centerLatitude: 20, centerLongitude: -101, spanLatitude: 6, spanLongitude: 8)
+        XCTAssertEqual(wide.count, 2)
+        XCTAssertEqual(wide.first?.ids.count, 30)
+        XCTAssertEqual(wide.first?.ids.first, "g29", "newest photo first")
+        // Close to Guadalajara: Mexico City is out of view.
+        let close = GeoPlace.clusters(points, centerLatitude: 20.66, centerLongitude: -103.35, spanLatitude: 0.5, spanLongitude: 0.5)
+        XCTAssertEqual(close.reduce(0) { $0 + $1.ids.count }, 30)
+        XCTAssertNotNil(GeoPlace.mainArea(points))
+        XCTAssertFalse(GeoPlace.valid(0, 0))
+    }
+
+    func testSearchByPlace() {
+        let item = GalleryItem(id: "a", source: .phone("a"), date: Date(), kind: .photo, aspect: 1, duration: nil, name: "", bytes: nil, folder: nil,
+                               latitude: 20.66, longitude: -103.35)
+        let found = Search.run("guadalajara", in: [item], favorites: { _ in false }, place: { _ in "guadalajara, jalisco, mexico" })
+        XCTAssertEqual(found.map(\.id), ["a"])
+        XCTAssertTrue(Search.run("cancun", in: [item], favorites: { _ in false }, place: { _ in "guadalajara, jalisco, mexico" }).isEmpty)
+    }
+}

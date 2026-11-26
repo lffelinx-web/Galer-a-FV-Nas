@@ -138,12 +138,13 @@ enum MediaBoxes {
 
     /// DateTimeOriginal and its offset from an EXIF block (a HEIC Exif item starts with a
     /// 4-byte offset to the TIFF header).
-    static func exifDate(heifItem bytes: [UInt8]) -> (date: String, offset: String?)? {
+    static func exifDate(heifItem bytes: [UInt8]) -> (date: String?, offset: String?, latitude: Double?, longitude: Double?)? {
         guard let skip = uint(bytes, 0, 4), Int(skip) + 4 < bytes.count else { return nil }
         return exifDate(tiff: Array(bytes[(4 + Int(skip))...]))
     }
 
-    static func exifDate(tiff bytes: [UInt8]) -> (date: String, offset: String?)? {
+    /// Also the GPS position, when the photo has one. Nil when there is neither.
+    static func exifDate(tiff bytes: [UInt8]) -> (date: String?, offset: String?, latitude: Double?, longitude: Double?)? {
         guard bytes.count >= 8 else { return nil }
         let little: Bool
         if bytes[0] == 0x49 && bytes[1] == 0x49 { little = true } else if bytes[0] == 0x4D && bytes[1] == 0x4D { little = false } else { return nil }
@@ -174,8 +175,29 @@ enum MediaBoxes {
             date = text(exif[0x9003]) ?? text(exif[0x9004])
             offset = text(exif[0x9011])
         }
-        guard let found = date ?? text(main[0x0132]) else { return nil }
-        return (found, offset)
+        func rationals(_ entry: (type: Int, count: Int, value: Int)?) -> [Double]? {
+            guard let entry, entry.type == 5, entry.count == 3, entry.value + 24 <= bytes.count else { return nil }
+            return (0..<3).compactMap { index -> Double? in
+                guard let top = u32(entry.value + index * 8), let bottom = u32(entry.value + index * 8 + 4), bottom > 0 else { return nil }
+                return Double(top) / Double(bottom)
+            }
+        }
+        func reference(_ entry: (type: Int, count: Int, value: Int)?) -> UInt8? {
+            // A one-letter text («N», «W») fits inside the entry itself.
+            guard let entry, entry.type == 2 else { return nil }
+            return UInt8(truncatingIfNeeded: little ? entry.value : entry.value >> 24)
+        }
+        var latitude: Double?, longitude: Double?
+        if let pointer = main[0x8825]?.value {
+            let gps = entries(pointer)
+            if let lat = rationals(gps[2]), lat.count == 3, let lon = rationals(gps[4]), lon.count == 3 {
+                latitude = (lat[0] + lat[1] / 60 + lat[2] / 3600) * (reference(gps[1]) == UInt8(ascii: "S") ? -1 : 1)
+                longitude = (lon[0] + lon[1] / 60 + lon[2] / 3600) * (reference(gps[3]) == UInt8(ascii: "W") ? -1 : 1)
+            }
+        }
+        let found = date ?? text(main[0x0132])
+        guard found != nil || latitude != nil else { return nil }
+        return (found, offset, latitude, longitude)
     }
 }
 

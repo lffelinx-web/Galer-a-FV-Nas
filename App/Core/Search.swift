@@ -1,8 +1,8 @@
 import Foundation
 
 /// Finds photos from a few words: a year («2023»), a month («mayo»), a day («14»), «hoy» or
-/// «ayer», a kind («videos», «capturas», «raw», «live», «favoritos», «iphone», «nas») or any
-/// part of a file or folder name. Every word must match.
+/// «ayer», a kind («videos», «capturas», «raw», «live», «favoritos», «iphone», «nas»), a
+/// place («Guadalajara», «Jalisco») or any part of a file or folder name. Every word must match.
 enum Search {
     private static let months: [[String]] = [
         ["enero", "january", "jan", "ene"], ["febrero", "february", "feb"], ["marzo", "march", "mar"],
@@ -17,15 +17,18 @@ enum Search {
     }
 
     /// The matching items, in the order given (newest first).
+    /// `place` gives the name of the place of an item, already normalized.
     static func run(_ query: String, in items: [GalleryItem], favorites: @escaping (GalleryItem) -> Bool,
+                    place: @escaping (GalleryItem) -> String? = { _ in nil },
                     calendar: Calendar = .current, now: Date = Date()) -> [GalleryItem] {
         let words = normalize(query).split(whereSeparator: { $0.isWhitespace || $0 == "," }).map(String.init).filter { !ignored.contains($0) }
         guard !words.isEmpty else { return [] }
-        let tests = words.map { test(for: $0, favorites: favorites, calendar: calendar, now: now) }
+        let tests = words.map { test(for: $0, favorites: favorites, place: place, calendar: calendar, now: now) }
         return items.filter { item in tests.allSatisfy { $0(item) } }
     }
 
-    private static func test(for word: String, favorites: @escaping (GalleryItem) -> Bool, calendar: Calendar, now: Date) -> (GalleryItem) -> Bool {
+    private static func test(for word: String, favorites: @escaping (GalleryItem) -> Bool, place: @escaping (GalleryItem) -> String?,
+                             calendar: Calendar, now: Date) -> (GalleryItem) -> Bool {
         switch word {
         case "video", "videos": return { $0.isVideo }
         case "foto", "fotos", "imagen", "imagenes": return { !$0.isVideo }
@@ -51,7 +54,7 @@ enum Search {
             return { calendar.component(.month, from: $0.date) == month + 1 }
         }
         return { item in
-            normalize(item.name).contains(word) || normalize(item.folder ?? "").contains(word)
+            normalize(item.name).contains(word) || normalize(item.folder ?? "").contains(word) || (place(item)?.contains(word) ?? false)
         }
     }
 }

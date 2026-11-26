@@ -613,7 +613,10 @@ struct NASInfoCard: View {
                     if let route = store.routeLabel { info("Conexión", route) }
                     if let space = store.spaceText { info("Espacio", space) }
                     if let date = store.lastScan { info("Última búsqueda", date.formatted(.relative(presentation: .named))) }
-                    if let status = store.datesStatus { info("Fechas", status.replacingOccurrences(of: "Ordenando por fecha · ", with: "")) }
+                    if let status = store.datesStatus {
+                        if status.hasPrefix("Leyendo ubicaciones") { info("Ubicaciones", status.replacingOccurrences(of: "Leyendo ubicaciones · ", with: "")) }
+                        else { info("Fechas", status.replacingOccurrences(of: "Ordenando por fecha · ", with: "")) }
+                    }
                     if store.duplicatesHidden > 0 { info("Duplicados", "\(store.duplicatesHidden.formatted()) ocultos en Fototeca") }
                 }
                 VStack(spacing: 8) {

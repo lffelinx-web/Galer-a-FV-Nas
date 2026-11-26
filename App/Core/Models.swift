@@ -61,6 +61,11 @@ struct GalleryItem: Identifiable, Hashable, Codable {
     var screenshot: Bool?
     /// A NAS file whose date on the NAS matches its folder: the moment it was taken.
     var exactDate: Bool?
+    /// Where it was taken, when known (GPS of the photo).
+    var latitude: Double?
+    var longitude: Double?
+
+    var hasLocation: Bool { latitude != nil && longitude != nil }
 
     var isVideo: Bool { kind == .video }
     var isNAS: Bool { if case .nas = source { return true } else { return false } }

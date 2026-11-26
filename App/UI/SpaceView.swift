@@ -68,6 +68,8 @@ struct SpaceStats {
     var videos = 0
     var phone = 0
     var nas = 0
+    /// Items with a location, for the map.
+    var located = 0
     var years: [YearCount] = []
     var counts: [SmartCollection: Int] = [:]
     /// The newest item of each collection, for its cover.
@@ -94,6 +96,7 @@ struct SpaceStats {
         for item in phone + nas where !hidden.contains(item.id) {
             if item.isVideo { stats.videos += 1 } else { stats.photos += 1 }
             if item.isNAS { stats.nas += 1 } else { stats.phone += 1 }
+            if item.hasLocation { stats.located += 1 }
             let parts = calendar.dateComponents([.year, .month, .day], from: item.date)
             let year = parts.year ?? 0
             years[year, default: 0] += 1
@@ -134,6 +137,7 @@ struct SpaceView: View {
     @State private var query = ""
     @State private var lockMessage: String?
     @State private var selectedYear: Int?
+    @State private var showMap = false
 
     var body: some View {
         NavigationStack {
@@ -166,6 +170,7 @@ struct SpaceView: View {
             .navigationDestination(for: UUID.self) { AlbumDetailView(id: $0) }
             .navigationDestination(for: SmartCollection.self) { CollectionView(collection: $0) }
             .navigationDestination(isPresented: $showHidden) { HiddenView() }
+            .navigationDestination(isPresented: $showMap) { PhotoMapView() }
             .alert("Nuevo álbum", isPresented: $naming) {
                 TextField("Nombre", text: $newName)
                 Button("Cancelar", role: .cancel) {}
@@ -194,6 +199,8 @@ struct SpaceView: View {
         if let selfie = await PhoneLibrary.shared.ids(in: .smartAlbumSelfPortraits, limit: 1).first { result.covers[.selfies] = store.itemIndex[selfie] }
         stats = result
         favorites = Array(store.favoriteItems.prefix(24))
+        // Names for the places of the photos, for the search, little by little.
+        if result.located > 0 { PlaceNames.shared.fill(store.allVisible) }
     }
 
     private func section<Content: View, Trailing: View>(_ title: String, @ViewBuilder trailing: () -> Trailing = { EmptyView() },
@@ -293,7 +300,30 @@ struct SpaceView: View {
                     .buttonStyle(PressStyle())
                 }
             }
+            Button { showMap = true } label: { mapTile }.buttonStyle(PressStyle())
         }
+    }
+
+    /// A wide tile under the collections that opens the map.
+    private var mapTile: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "map.fill")
+                .font(.system(size: 22, weight: .semibold)).foregroundStyle(.white)
+                .frame(width: 48, height: 48)
+                .background(LinearGradient(colors: [Palette.accent, Palette.accent.opacity(0.7)], startPoint: .topLeading, endPoint: .bottomTrailing),
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Mapa").font(.headline).foregroundStyle(Palette.ink)
+                Text(stats.located > 0 ? countText(stats.located, "foto con ubicación", "fotos con ubicación") : "Dónde tomaste tus fotos")
+                    .font(.footnote).foregroundStyle(Palette.secondary)
+            }
+            Spacer()
+            Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(Palette.secondary)
+        }
+        .padding(12)
+        .background(Palette.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Palette.cardStroke, lineWidth: 1))
+        .padding(.top, 12)
     }
 
     // MARK: Utilities
@@ -691,7 +721,7 @@ struct SearchResults: View {
             if let results {
                 if results.isEmpty {
                     EmptyState(symbol: "magnifyingglass", title: "Sin resultados",
-                               message: "Prueba con un año («2023»), un mes («mayo»), «videos», «capturas», «favoritos» o parte del nombre de una carpeta.")
+                               message: "Prueba con un lugar («Guadalajara»), un año («2023»), un mes («mayo»), «videos», «capturas», «favoritos» o parte del nombre de una carpeta.")
                 } else {
                     Text(mediaSummary(results)).font(.footnote).foregroundStyle(Palette.secondary)
                     SquareGrid(items: results, columns: 4)
@@ -706,9 +736,14 @@ struct SearchResults: View {
             guard !Task.isCancelled else { return }
             let all = store.allVisible.sorted { $0.date > $1.date }
             let favorites = store.favorites
+            let places = PlaceNames.shared.names
             let text = query
-            let found = await Task.detached(priority: .userInitiated) {
-                Search.run(text, in: all) { item in favorites.contains(item.id) }
+            let found = await Task.detached(priority: .userInitiated) { () -> [GalleryItem] in
+                let normalized = places.mapValues(Search.normalize)
+                return Search.run(text, in: all, favorites: { favorites.contains($0.id) }, place: { item in
+                    guard let latitude = item.latitude, let longitude = item.longitude else { return nil }
+                    return normalized[GeoPlace.areaKey(latitude, longitude)]
+                })
             }.value
             guard !Task.isCancelled else { return }
             results = found
